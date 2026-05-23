@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+outputs/*.png
+outputs/*.json
+outputs/debug/
+!outputs/.gitkeep
