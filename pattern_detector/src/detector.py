@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .chamfer import symmetric_chamfer_scores
+from .chamfer import ChamferScores, distance_transform_to_edges
 from .descriptor_matching import (
     DescriptorCandidate,
     DescriptorSearchDebug,
@@ -48,6 +49,11 @@ class Detection:
     patch_coverage: float
     extra_patch_ratio: float
     chamfer_distance: float
+    core_edge_f1: float = 0.0
+    connector_edge_f1: float = 0.0
+    core_chamfer_similarity: float = 0.0
+    connector_chamfer_similarity: float = 0.0
+    shape_score: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -63,9 +69,24 @@ class Detection:
             "patch_coverage",
             "extra_patch_ratio",
             "chamfer_distance",
+            "core_edge_f1",
+            "connector_edge_f1",
+            "core_chamfer_similarity",
+            "connector_chamfer_similarity",
+            "shape_score",
         ):
             data[key] = round_float(float(data[key]))
         return data
+
+
+@dataclass
+class CandidateDebug:
+    detection: Detection
+    patch: np.ndarray
+    core_edge: np.ndarray
+    connector_edge: np.ndarray
+    core_validation: Any
+    connector_validation: Any
 
 
 @dataclass
@@ -84,8 +105,10 @@ class DetectorConfig:
     chamfer_sigma: float = 8.0
     max_chamfer_distance: float = 12.0
     min_template_coverage: float = 0.25
+    min_patch_coverage: float = 0.25
     max_extra_patch_ratio: float = 0.90
-    validation_dilation_iterations: int = 1
+    validation_dilation_iterations: int = 2
+    local_refinement_radius: int = 4
     max_detections: int = 200
     pattern_padding: int = 4
     enable_debug: bool = False
@@ -128,6 +151,7 @@ class PatternDetector:
                 drawing_skeleton=drawing.skeleton,
                 debug_dir=cfg.debug_dir,
             )
+            self._save_template_split_debug(pattern.skeleton)
 
         base_rotations = parse_rotations(cfg.rotations)
         rotations = expand_rotations(
@@ -153,13 +177,16 @@ class PatternDetector:
         )
 
         scored: list[Detection] = []
+        debug_details: list[CandidateDebug] = []
         num_after_chamfer_extreme_filter = 0
         for candidate in descriptor_candidates:
-            detection, survived_chamfer_extreme = self._validate_candidate(candidate, drawing.skeleton)
+            detection, survived_chamfer_extreme, debug_detail = self._validate_candidate(candidate, drawing.skeleton)
             if survived_chamfer_extreme:
                 num_after_chamfer_extreme_filter += 1
             if detection is not None:
                 scored.append(detection)
+                if debug_detail is not None:
+                    debug_details.append(debug_detail)
 
         validated = [det for det in scored if det.confidence >= cfg.threshold]
         before_validation = [
@@ -186,17 +213,32 @@ class PatternDetector:
 
         if cfg.enable_debug:
             self._print_debug_counts()
-            self._save_debug_visuals(drawing.original_bgr, before_validation, before_nms, visualization, search_debug)
+            self._save_debug_visuals(
+                drawing.original_bgr,
+                before_validation,
+                before_nms,
+                visualization,
+                search_debug,
+                sorted(debug_details, key=lambda item: item.detection.confidence, reverse=True),
+            )
 
         return mapped, visualization
 
     
-    def _validate_candidate(self, candidate: DescriptorCandidate, drawing_skeleton: np.ndarray) -> tuple[Detection | None, bool]:
+    def _validate_candidate(
+        self,
+        candidate: DescriptorCandidate,
+        drawing_skeleton: np.ndarray,
+    ) -> tuple[Detection | None, bool, CandidateDebug | None]:
         cfg = self.config
         w, h = candidate.w, candidate.h
-        offsets = _refinement_offsets(cfg.stride)
+        offsets = _refinement_offsets(cfg.local_refinement_radius)
         best: Detection | None = None
+        best_debug: CandidateDebug | None = None
         survived_chamfer_extreme = False
+        template = candidate.variant.edge
+        core_edge, connector_edge, weight_mask = split_template_core_and_connectors(template)
+        template_weight = np.where(template > 0, weight_mask, 0.0).astype(np.float32)
 
         for dy in offsets:
             for dx in offsets:
@@ -206,35 +248,74 @@ class PatternDetector:
                     continue
 
                 patch = drawing_skeleton[y : y + h, x : x + w]
-                template = candidate.variant.edge
-
-                chamfer = symmetric_chamfer_scores(template, patch, sigma=cfg.chamfer_sigma)
-                if chamfer.symmetric_distance > cfg.max_chamfer_distance * 2.5:
+                core_chamfer = _weighted_chamfer_scores(core_edge, patch, template_weight, sigma=cfg.chamfer_sigma)
+                if core_chamfer.symmetric_distance > cfg.max_chamfer_distance * 2.5:
                     continue
                 survived_chamfer_extreme = True
 
                 chamfer_penalty = 1.0
-                if chamfer.symmetric_distance > cfg.max_chamfer_distance:
+                if core_chamfer.symmetric_distance > cfg.max_chamfer_distance:
                     chamfer_penalty = 0.70
 
-                validation = validate_edge_candidate(
+                core_validation = validate_edge_candidate(
+                    core_edge,
+                    patch,
+                    min_template_coverage=cfg.min_template_coverage,
+                    min_patch_coverage=0.0,
+                    max_extra_patch_ratio=1.0,
+                    dilation_iterations=cfg.validation_dilation_iterations,
+                    center_weight=template_weight,
+                )
+                connector_validation = validate_edge_candidate(
+                    connector_edge,
+                    patch,
+                    min_template_coverage=0.0,
+                    min_patch_coverage=0.0,
+                    max_extra_patch_ratio=1.0,
+                    dilation_iterations=cfg.validation_dilation_iterations,
+                    center_weight=template_weight,
+                )
+                coverage_validation = validate_edge_candidate(
                     template,
                     patch,
                     min_template_coverage=cfg.min_template_coverage,
+                    min_patch_coverage=cfg.min_patch_coverage,
                     max_extra_patch_ratio=cfg.max_extra_patch_ratio,
                     dilation_iterations=cfg.validation_dilation_iterations,
                 )
 
-                validation_penalty = 1.0 if validation.passed else 0.70
+                connector_chamfer = _weighted_chamfer_scores(
+                    connector_edge,
+                    patch,
+                    template_weight,
+                    sigma=cfg.chamfer_sigma,
+                )
+                core_edge_f1 = core_validation.edge_f1
+                connector_edge_f1 = connector_validation.edge_f1
+                shape_score = (
+                    0.60 * core_edge_f1
+                    + 0.30 * core_chamfer.similarity
+                    + 0.10 * connector_edge_f1
+                )
+                if core_edge_f1 < 0.20:
+                    shape_score *= 0.40
+
+                validation_penalty = 1.0 if coverage_validation.passed else 0.70
+                coverage_penalty = 1.0
+                if coverage_validation.patch_coverage < cfg.min_patch_coverage:
+                    coverage_penalty *= 0.65
+                if coverage_validation.extra_patch_ratio > 0.80:
+                    coverage_penalty *= 0.75
 
                 confidence = (
                     0.05 * candidate.descriptor_similarity
-                    + 0.45 * chamfer.similarity
-                    + 0.45 * validation.edge_f1
-                    + 0.05 * validation.density_score
+                    + 0.55 * core_edge_f1
+                    + 0.30 * core_chamfer.similarity
+                    + 0.10 * coverage_validation.density_score
                 )
                 confidence *= chamfer_penalty
                 confidence *= validation_penalty
+                confidence *= coverage_penalty
                 confidence = float(np.clip(confidence, 0.0, 1.0))
 
                 detection = Detection(
@@ -246,19 +327,32 @@ class PatternDetector:
                     scale=candidate.scale,
                     rotation=candidate.rotation,
                     descriptor_similarity=candidate.descriptor_similarity,
-                    chamfer_similarity=chamfer.similarity,
-                    edge_f1=validation.edge_f1,
-                    density_score=validation.density_score,
-                    template_coverage=validation.template_coverage,
-                    patch_coverage=validation.patch_coverage,
-                    extra_patch_ratio=validation.extra_patch_ratio,
-                    chamfer_distance=chamfer.symmetric_distance,
+                    chamfer_similarity=core_chamfer.similarity,
+                    edge_f1=core_edge_f1,
+                    density_score=coverage_validation.density_score,
+                    template_coverage=coverage_validation.template_coverage,
+                    patch_coverage=coverage_validation.patch_coverage,
+                    extra_patch_ratio=coverage_validation.extra_patch_ratio,
+                    chamfer_distance=core_chamfer.symmetric_distance,
+                    core_edge_f1=core_edge_f1,
+                    connector_edge_f1=connector_edge_f1,
+                    core_chamfer_similarity=core_chamfer.similarity,
+                    connector_chamfer_similarity=connector_chamfer.similarity,
+                    shape_score=shape_score,
                 )
 
                 if best is None or detection.confidence > best.confidence:
                     best = detection
+                    best_debug = CandidateDebug(
+                        detection=detection,
+                        patch=patch.copy(),
+                        core_edge=core_edge.copy(),
+                        connector_edge=connector_edge.copy(),
+                        core_validation=core_validation,
+                        connector_validation=connector_validation,
+                    )
 
-        return best, survived_chamfer_extreme
+        return best, survived_chamfer_extreme, best_debug
 
     def _save_debug_visuals(
         self,
@@ -267,6 +361,7 @@ class PatternDetector:
         before_nms: list[Detection],
         final_visualization: np.ndarray,
         search_debug: DescriptorSearchDebug,
+        debug_details: list[CandidateDebug],
     ) -> None:
         debug_dir = Path(self.config.debug_dir)
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -282,10 +377,21 @@ class PatternDetector:
             heatmap_color = cv2.applyColorMap(heatmap_u8, cv2.COLORMAP_TURBO)
             save_visualization(heatmap_color, str(debug_dir / "descriptor_heatmap_s1_r0.png"))
 
+        if debug_details:
+            self._save_candidate_debug(debug_dir, debug_details[:50])
+
     def _print_debug_counts(self) -> None:
         print("Detection debug counts:")
         for key, value in self.last_debug_counts.items():
             print(f"  {key}: {value}")
+
+    def _save_template_split_debug(self, template_edge: np.ndarray) -> None:
+        debug_dir = Path(self.config.debug_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        core_edge, connector_edge, weight_mask = split_template_core_and_connectors(template_edge)
+        save_visualization(_edge_to_bgr(core_edge), str(debug_dir / "template_core_edge.png"))
+        save_visualization(_edge_to_bgr(connector_edge), str(debug_dir / "template_connector_edge.png"))
+        save_visualization(_gray_to_bgr((weight_mask * 255).astype(np.uint8)), str(debug_dir / "template_weight_mask.png"))
 
     @staticmethod
     def _raw_candidates_to_detections(candidates: list[DescriptorCandidate]) -> list[Detection]:
@@ -306,6 +412,11 @@ class PatternDetector:
                 patch_coverage=0.0,
                 extra_patch_ratio=0.0,
                 chamfer_distance=0.0,
+                core_edge_f1=0.0,
+                connector_edge_f1=0.0,
+                core_chamfer_similarity=0.0,
+                connector_chamfer_similarity=0.0,
+                shape_score=0.0,
             )
             for candidate in candidates
         ]
@@ -336,15 +447,148 @@ class PatternDetector:
             patch_coverage=det.patch_coverage,
             extra_patch_ratio=det.extra_patch_ratio,
             chamfer_distance=det.chamfer_distance,
+            core_edge_f1=det.core_edge_f1,
+            connector_edge_f1=det.connector_edge_f1,
+            core_chamfer_similarity=det.core_chamfer_similarity,
+            connector_chamfer_similarity=det.connector_chamfer_similarity,
+            shape_score=det.shape_score,
         )
 
+    def _save_candidate_debug(self, debug_dir: Path, debug_details: list[CandidateDebug]) -> None:
+        for idx, detail in enumerate(debug_details):
+            prefix = debug_dir / f"det_{idx:03d}"
+            save_visualization(_edge_to_bgr(detail.patch), str(prefix.with_name(f"{prefix.name}_patch_skeleton.png")))
+            save_visualization(
+                _overlap_visualization(detail.core_edge, detail.patch),
+                str(prefix.with_name(f"{prefix.name}_core_overlap.png")),
+            )
+            save_visualization(
+                _overlap_visualization(detail.connector_edge, detail.patch),
+                str(prefix.with_name(f"{prefix.name}_connector_overlap.png")),
+            )
+            metrics = detail.detection.to_json()
+            metrics.update(
+                {
+                    "core_template_coverage": round_float(detail.core_validation.template_coverage),
+                    "core_patch_coverage": round_float(detail.core_validation.patch_coverage),
+                    "connector_template_coverage": round_float(detail.connector_validation.template_coverage),
+                    "connector_patch_coverage": round_float(detail.connector_validation.patch_coverage),
+                    "final_confidence": round_float(detail.detection.confidence),
+                }
+            )
+            with open(prefix.with_name(f"{prefix.name}_metrics.json"), "w", encoding="utf-8") as f:
+                json.dump(metrics, f, indent=2)
 
-def _refinement_offsets(stride: int) -> list[int]:
-    radius = max(1, int(stride))
-    half = max(1, radius // 2)
-    offsets = [-radius, -half, 0, half, radius]
-    unique: list[int] = []
-    for offset in offsets:
-        if offset not in unique:
-            unique.append(offset)
-    return unique
+
+def _refinement_offsets(radius: int) -> list[int]:
+    radius = max(0, int(radius))
+    return list(range(-radius, radius + 1))
+
+
+def split_template_core_and_connectors(template_edge: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    template = np.where(template_edge > 0, 255, 0).astype(np.uint8)
+    h, w = template.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w]
+    edge_mask = template > 0
+
+    horizontal_connector = (
+        np.abs(yy.astype(np.float32) - (h / 2.0)) < (0.12 * h)
+    ) & ((xx < (0.20 * w)) | (xx > (0.80 * w)))
+    vertical_connector = (
+        np.abs(xx.astype(np.float32) - (w / 2.0)) < (0.12 * w)
+    ) & ((yy < (0.20 * h)) | (yy > (0.80 * h)))
+
+    connector_mask = edge_mask & (horizontal_connector | vertical_connector)
+    core_mask = edge_mask & ~connector_mask
+
+    core_edge = np.where(core_mask, 255, 0).astype(np.uint8)
+    connector_edge = np.where(connector_mask, 255, 0).astype(np.uint8)
+    weight_mask = np.zeros((h, w), dtype=np.float32)
+    weight_mask[core_mask] = 1.0
+    weight_mask[connector_mask] = 0.20
+    return core_edge, connector_edge, weight_mask
+
+
+def _weighted_chamfer_scores(
+    template_edge: np.ndarray,
+    patch_edge: np.ndarray,
+    weight_mask: np.ndarray,
+    *,
+    sigma: float,
+) -> ChamferScores:
+    template = np.where(template_edge > 0, 255, 0).astype(np.uint8)
+    patch = np.where(patch_edge > 0, 255, 0).astype(np.uint8)
+    weights = np.asarray(weight_mask, dtype=np.float32)
+    if weights.shape[:2] != template.shape[:2]:
+        weights = cv2.resize(weights, (template.shape[1], template.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    t2p = _weighted_one_way_chamfer(template, patch, weights)
+    p2t = _weighted_one_way_chamfer(patch, template, weights)
+
+    if not np.isfinite(t2p) or not np.isfinite(p2t):
+        return ChamferScores(
+            template_to_patch_distance=float("inf"),
+            patch_to_template_distance=float("inf"),
+            symmetric_distance=float("inf"),
+            similarity=0.0,
+        )
+
+    symmetric_distance = max(t2p, p2t)
+    similarity = float(np.exp(-symmetric_distance / max(sigma, 1e-6)))
+    return ChamferScores(
+        template_to_patch_distance=float(t2p),
+        patch_to_template_distance=float(p2t),
+        symmetric_distance=float(symmetric_distance),
+        similarity=float(np.clip(similarity, 0.0, 1.0)),
+    )
+
+
+def _weighted_one_way_chamfer(source_edge: np.ndarray, target_edge: np.ndarray, weights: np.ndarray) -> float:
+    source_mask = source_edge > 0
+    if not np.any(source_mask):
+        return float("inf")
+
+    target_distance = distance_transform_to_edges(target_edge)
+    distances = target_distance[source_mask]
+    source_weights = weights[source_mask]
+    if distances.size == 0 or source_weights.size == 0:
+        return float("inf")
+
+    return _weighted_percentile(distances.astype(np.float32), source_weights.astype(np.float32), percentile=80.0)
+
+
+def _weighted_percentile(values: np.ndarray, weights: np.ndarray, *, percentile: float) -> float:
+    positive = weights > 0
+    if not np.any(positive):
+        return float("inf")
+
+    values = values[positive]
+    weights = weights[positive]
+    order = np.argsort(values)
+    sorted_values = values[order]
+    sorted_weights = weights[order]
+    cumulative = np.cumsum(sorted_weights)
+    cutoff = (percentile / 100.0) * float(cumulative[-1])
+    index = int(np.searchsorted(cumulative, cutoff, side="left"))
+    index = min(max(index, 0), sorted_values.size - 1)
+    return float(sorted_values[index])
+
+
+def _edge_to_bgr(edge_img: np.ndarray) -> np.ndarray:
+    edge = np.where(edge_img > 0, 255, 0).astype(np.uint8)
+    return cv2.cvtColor(edge, cv2.COLOR_GRAY2BGR)
+
+
+def _gray_to_bgr(gray: np.ndarray) -> np.ndarray:
+    image = np.asarray(gray, dtype=np.uint8)
+    return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+
+def _overlap_visualization(template_edge: np.ndarray, patch_edge: np.ndarray) -> np.ndarray:
+    template = template_edge > 0
+    patch = patch_edge > 0
+    vis = np.zeros((*template.shape[:2], 3), dtype=np.uint8)
+    vis[np.logical_and(template, patch)] = (0, 255, 0)
+    vis[np.logical_and(template, ~patch)] = (0, 0, 255)
+    vis[np.logical_and(~template, patch)] = (255, 0, 0)
+    return vis

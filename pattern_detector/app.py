@@ -36,8 +36,10 @@ def run_detection(
     chamfer_sigma: float,
     max_chamfer_distance: float,
     min_template_coverage: float,
+    min_patch_coverage: float,
     max_extra_patch_ratio: float,
     validation_dilation_iterations: int,
+    local_refinement_radius: int,
     enable_debug: bool,
 ) -> tuple[np.ndarray | None, str, str]:
     start = time.perf_counter()
@@ -59,8 +61,10 @@ def run_detection(
         chamfer_sigma=chamfer_sigma,
         max_chamfer_distance=max_chamfer_distance,
         min_template_coverage=min_template_coverage,
+        min_patch_coverage=min_patch_coverage,
         max_extra_patch_ratio=max_extra_patch_ratio,
         validation_dilation_iterations=int(validation_dilation_iterations),
+        local_refinement_radius=int(local_refinement_radius),
         enable_debug=enable_debug,
     )
     detector = PatternDetector(config)
@@ -125,8 +129,11 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
             max_chamfer_distance = gr.Slider(1.0, 40.0, value=12.0, step=0.5, label="Max chamfer distance")
         with gr.Row():
             min_template_coverage = gr.Slider(0.0, 1.0, value=0.25, step=0.01, label="Min template coverage")
+            min_patch_coverage = gr.Slider(0.0, 1.0, value=0.25, step=0.01, label="Min patch coverage")
             max_extra_patch_ratio = gr.Slider(0.0, 1.0, value=0.90, step=0.01, label="Max extra patch ratio")
-            validation_dilation_iterations = gr.Slider(0, 5, value=1, step=1, label="Validation dilation iterations")
+        with gr.Row():
+            validation_dilation_iterations = gr.Slider(0, 5, value=2, step=1, label="Validation dilation iterations")
+            local_refinement_radius = gr.Slider(0, 8, value=4, step=1, label="Local refinement radius")
 
     run_button = gr.Button("Detect", variant="primary")
 
@@ -155,8 +162,10 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
             chamfer_sigma,
             max_chamfer_distance,
             min_template_coverage,
+            min_patch_coverage,
             max_extra_patch_ratio,
             validation_dilation_iterations,
+            local_refinement_radius,
             enable_debug,
         ],
         outputs=[output_image, output_json, runtime],

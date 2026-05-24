@@ -28,8 +28,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chamfer-sigma", type=float, default=8.0, help="Distance-to-similarity sigma")
     parser.add_argument("--max-chamfer-distance", type=float, default=12.0, help="Soft Chamfer distance threshold")
     parser.add_argument("--min-template-coverage", type=float, default=0.25, help="Minimum template edge coverage")
+    parser.add_argument("--min-patch-coverage", type=float, default=0.25, help="Minimum patch edge coverage")
     parser.add_argument("--max-extra-patch-ratio", type=float, default=0.90, help="Maximum extra patch edge ratio")
-    parser.add_argument("--validation-dilation-iterations", type=int, default=1, help="Edge validation dilation iterations")
+    parser.add_argument("--validation-dilation-iterations", type=int, default=2, help="Edge validation dilation iterations")
+    parser.add_argument("--local-refinement-radius", type=int, default=4, help="Local bbox refinement radius in pixels")
     parser.add_argument("--max-detections", type=int, default=200, help="Maximum boxes after NMS")
     parser.add_argument("--pattern-padding", type=int, default=4, help="Foreground crop padding for pattern")
     parser.add_argument("--enable-debug", action="store_true", help="Save preprocessing and debug visualization images")
@@ -54,8 +56,10 @@ def main() -> None:
         chamfer_sigma=args.chamfer_sigma,
         max_chamfer_distance=args.max_chamfer_distance,
         min_template_coverage=args.min_template_coverage,
+        min_patch_coverage=args.min_patch_coverage,
         max_extra_patch_ratio=args.max_extra_patch_ratio,
         validation_dilation_iterations=args.validation_dilation_iterations,
+        local_refinement_radius=args.local_refinement_radius,
         max_detections=args.max_detections,
         pattern_padding=args.pattern_padding,
         enable_debug=args.enable_debug,
