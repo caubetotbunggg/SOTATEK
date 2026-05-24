@@ -87,6 +87,10 @@ class CandidateDebug:
     connector_edge: np.ndarray
     core_validation: Any
     connector_validation: Any
+    coarse_box: tuple[int, int, int, int]
+    refinement_shift: tuple[int, int]
+    refinement_scale: float
+    refine_score: float
 
 
 @dataclass
@@ -109,6 +113,7 @@ class DetectorConfig:
     max_extra_patch_ratio: float = 0.90
     validation_dilation_iterations: int = 2
     local_refinement_radius: int = 4
+    validation_padding: int = 3
     max_detections: int = 200
     pattern_padding: int = 4
     enable_debug: bool = False
@@ -237,122 +242,173 @@ class PatternDetector:
         best_debug: CandidateDebug | None = None
         survived_chamfer_extreme = False
         template = candidate.variant.edge
-        core_edge, connector_edge, weight_mask = split_template_core_and_connectors(template)
-        template_weight = np.where(template > 0, weight_mask, 0.0).astype(np.float32)
 
-        for dy in offsets:
-            for dx in offsets:
-                x = candidate.x + dx
-                y = candidate.y + dy
-                if x < 0 or y < 0 or y + h > drawing_skeleton.shape[0] or x + w > drawing_skeleton.shape[1]:
-                    continue
+        for scale_multiplier in (0.95, 1.0, 1.05):
+            scaled_template = _resize_edge_template(template, scale_multiplier)
+            if scaled_template.size == 0:
+                continue
+            scaled_h, scaled_w = scaled_template.shape[:2]
+            center_adjust_x = int(round((scaled_w - w) / 2.0))
+            center_adjust_y = int(round((scaled_h - h) / 2.0))
 
-                patch = drawing_skeleton[y : y + h, x : x + w]
-                core_chamfer = _weighted_chamfer_scores(core_edge, patch, template_weight, sigma=cfg.chamfer_sigma)
-                if core_chamfer.symmetric_distance > cfg.max_chamfer_distance * 2.5:
-                    continue
-                survived_chamfer_extreme = True
-
-                chamfer_penalty = 1.0
-                if core_chamfer.symmetric_distance > cfg.max_chamfer_distance:
-                    chamfer_penalty = 0.70
-
-                core_validation = validate_edge_candidate(
-                    core_edge,
-                    patch,
-                    min_template_coverage=cfg.min_template_coverage,
-                    min_patch_coverage=0.0,
-                    max_extra_patch_ratio=1.0,
-                    dilation_iterations=cfg.validation_dilation_iterations,
-                    center_weight=template_weight,
-                )
-                connector_validation = validate_edge_candidate(
-                    connector_edge,
-                    patch,
-                    min_template_coverage=0.0,
-                    min_patch_coverage=0.0,
-                    max_extra_patch_ratio=1.0,
-                    dilation_iterations=cfg.validation_dilation_iterations,
-                    center_weight=template_weight,
-                )
-                coverage_validation = validate_edge_candidate(
-                    template,
-                    patch,
-                    min_template_coverage=cfg.min_template_coverage,
-                    min_patch_coverage=cfg.min_patch_coverage,
-                    max_extra_patch_ratio=cfg.max_extra_patch_ratio,
-                    dilation_iterations=cfg.validation_dilation_iterations,
-                )
-
-                connector_chamfer = _weighted_chamfer_scores(
-                    connector_edge,
-                    patch,
-                    template_weight,
-                    sigma=cfg.chamfer_sigma,
-                )
-                core_edge_f1 = core_validation.edge_f1
-                connector_edge_f1 = connector_validation.edge_f1
-                shape_score = (
-                    0.60 * core_edge_f1
-                    + 0.30 * core_chamfer.similarity
-                    + 0.10 * connector_edge_f1
-                )
-                if core_edge_f1 < 0.20:
-                    shape_score *= 0.40
-
-                validation_penalty = 1.0 if coverage_validation.passed else 0.70
-                coverage_penalty = 1.0
-                if coverage_validation.patch_coverage < cfg.min_patch_coverage:
-                    coverage_penalty *= 0.65
-                if coverage_validation.extra_patch_ratio > 0.80:
-                    coverage_penalty *= 0.75
-
-                confidence = (
-                    0.05 * candidate.descriptor_similarity
-                    + 0.55 * core_edge_f1
-                    + 0.30 * core_chamfer.similarity
-                    + 0.10 * coverage_validation.density_score
-                )
-                confidence *= chamfer_penalty
-                confidence *= validation_penalty
-                confidence *= coverage_penalty
-                confidence = float(np.clip(confidence, 0.0, 1.0))
-
-                detection = Detection(
-                    x=x,
-                    y=y,
-                    w=w,
-                    h=h,
-                    confidence=confidence,
-                    scale=candidate.scale,
-                    rotation=candidate.rotation,
-                    descriptor_similarity=candidate.descriptor_similarity,
-                    chamfer_similarity=core_chamfer.similarity,
-                    edge_f1=core_edge_f1,
-                    density_score=coverage_validation.density_score,
-                    template_coverage=coverage_validation.template_coverage,
-                    patch_coverage=coverage_validation.patch_coverage,
-                    extra_patch_ratio=coverage_validation.extra_patch_ratio,
-                    chamfer_distance=core_chamfer.symmetric_distance,
-                    core_edge_f1=core_edge_f1,
-                    connector_edge_f1=connector_edge_f1,
-                    core_chamfer_similarity=core_chamfer.similarity,
-                    connector_chamfer_similarity=connector_chamfer.similarity,
-                    shape_score=shape_score,
-                )
-
-                if best is None or detection.confidence > best.confidence:
-                    best = detection
-                    best_debug = CandidateDebug(
-                        detection=detection,
-                        patch=patch.copy(),
-                        core_edge=core_edge.copy(),
-                        connector_edge=connector_edge.copy(),
-                        core_validation=core_validation,
-                        connector_validation=connector_validation,
+            for dy in offsets:
+                for dx in offsets:
+                    x = candidate.x + dx - center_adjust_x
+                    y = candidate.y + dy - center_adjust_y
+                    prepared = _prepare_refinement_patch(
+                        scaled_template,
+                        drawing_skeleton,
+                        x=x,
+                        y=y,
+                        padding=cfg.validation_padding,
                     )
+                    if prepared is None:
+                        continue
+
+                    detection, debug_detail, refine_score = self._score_refined_candidate(
+                        candidate=candidate,
+                        patch=prepared["patch"],
+                        template=prepared["template"],
+                        core_edge=prepared["core_edge"],
+                        connector_edge=prepared["connector_edge"],
+                        template_weight=prepared["template_weight"],
+                        bbox=prepared["bbox"],
+                        coarse_box=(candidate.x, candidate.y, w, h),
+                        refinement_shift=(dx, dy),
+                        refinement_scale=scale_multiplier,
+                    )
+                    if detection is None or debug_detail is None:
+                        continue
+
+                    survived_chamfer_extreme = True
+                    if best is None or refine_score > best_debug.refine_score:
+                        best = detection
+                        best_debug = debug_detail
 
         return best, survived_chamfer_extreme, best_debug
+
+    def _score_refined_candidate(
+        self,
+        *,
+        candidate: DescriptorCandidate,
+        patch: np.ndarray,
+        template: np.ndarray,
+        core_edge: np.ndarray,
+        connector_edge: np.ndarray,
+        template_weight: np.ndarray,
+        bbox: tuple[int, int, int, int],
+        coarse_box: tuple[int, int, int, int],
+        refinement_shift: tuple[int, int],
+        refinement_scale: float,
+    ) -> tuple[Detection | None, CandidateDebug | None, float]:
+        cfg = self.config
+        x, y, w, h = bbox
+
+        core_chamfer = _weighted_chamfer_scores(core_edge, patch, template_weight, sigma=cfg.chamfer_sigma)
+        if core_chamfer.symmetric_distance > cfg.max_chamfer_distance * 2.5:
+            return None, None, 0.0
+
+        chamfer_penalty = 1.0
+        if core_chamfer.symmetric_distance > cfg.max_chamfer_distance:
+            chamfer_penalty = 0.70
+
+        core_validation = validate_edge_candidate(
+            core_edge,
+            patch,
+            min_template_coverage=cfg.min_template_coverage,
+            min_patch_coverage=0.0,
+            max_extra_patch_ratio=1.0,
+            dilation_iterations=cfg.validation_dilation_iterations,
+            center_weight=template_weight,
+        )
+        connector_validation = validate_edge_candidate(
+            connector_edge,
+            patch,
+            min_template_coverage=0.0,
+            min_patch_coverage=0.0,
+            max_extra_patch_ratio=1.0,
+            dilation_iterations=cfg.validation_dilation_iterations,
+            center_weight=template_weight,
+        )
+        coverage_validation = validate_edge_candidate(
+            template,
+            patch,
+            min_template_coverage=cfg.min_template_coverage,
+            min_patch_coverage=cfg.min_patch_coverage,
+            max_extra_patch_ratio=cfg.max_extra_patch_ratio,
+            dilation_iterations=cfg.validation_dilation_iterations,
+        )
+
+        connector_chamfer = _weighted_chamfer_scores(
+            connector_edge,
+            patch,
+            template_weight,
+            sigma=cfg.chamfer_sigma,
+        )
+        core_edge_f1 = core_validation.edge_f1
+        connector_edge_f1 = connector_validation.edge_f1
+        refine_score = float(np.clip((0.60 * core_edge_f1) + (0.40 * core_chamfer.similarity), 0.0, 1.0))
+        shape_score = (
+            0.60 * core_edge_f1
+            + 0.30 * core_chamfer.similarity
+            + 0.10 * connector_edge_f1
+        )
+        if core_edge_f1 < 0.20:
+            shape_score *= 0.40
+
+        validation_penalty = 1.0 if coverage_validation.passed else 0.70
+        coverage_penalty = 1.0
+        if coverage_validation.patch_coverage < cfg.min_patch_coverage:
+            coverage_penalty *= 0.65
+        if coverage_validation.extra_patch_ratio > 0.80:
+            coverage_penalty *= 0.75
+
+        confidence = (
+            0.05 * candidate.descriptor_similarity
+            + 0.55 * core_edge_f1
+            + 0.30 * core_chamfer.similarity
+            + 0.10 * coverage_validation.density_score
+        )
+        confidence *= chamfer_penalty
+        confidence *= validation_penalty
+        confidence *= coverage_penalty
+        confidence = float(np.clip(confidence, 0.0, 1.0))
+
+        detection = Detection(
+            x=x,
+            y=y,
+            w=w,
+            h=h,
+            confidence=confidence,
+            scale=candidate.scale * refinement_scale,
+            rotation=candidate.rotation,
+            descriptor_similarity=candidate.descriptor_similarity,
+            chamfer_similarity=core_chamfer.similarity,
+            edge_f1=core_edge_f1,
+            density_score=coverage_validation.density_score,
+            template_coverage=coverage_validation.template_coverage,
+            patch_coverage=coverage_validation.patch_coverage,
+            extra_patch_ratio=coverage_validation.extra_patch_ratio,
+            chamfer_distance=core_chamfer.symmetric_distance,
+            core_edge_f1=core_edge_f1,
+            connector_edge_f1=connector_edge_f1,
+            core_chamfer_similarity=core_chamfer.similarity,
+            connector_chamfer_similarity=connector_chamfer.similarity,
+            shape_score=shape_score,
+        )
+        debug_detail = CandidateDebug(
+            detection=detection,
+            patch=patch.copy(),
+            core_edge=core_edge.copy(),
+            connector_edge=connector_edge.copy(),
+            core_validation=core_validation,
+            connector_validation=connector_validation,
+            coarse_box=coarse_box,
+            refinement_shift=refinement_shift,
+            refinement_scale=refinement_scale,
+            refine_score=refine_score,
+        )
+        return detection, debug_detail, refine_score
 
     def _save_debug_visuals(
         self,
@@ -467,6 +523,10 @@ class PatternDetector:
                 _overlap_visualization(detail.connector_edge, detail.patch),
                 str(prefix.with_name(f"{prefix.name}_connector_overlap.png")),
             )
+            save_visualization(
+                _refinement_overlay(detail.coarse_box, detail.detection),
+                str(prefix.with_name(f"{prefix.name}_refinement_overlay.png")),
+            )
             metrics = detail.detection.to_json()
             metrics.update(
                 {
@@ -474,6 +534,14 @@ class PatternDetector:
                     "core_patch_coverage": round_float(detail.core_validation.patch_coverage),
                     "connector_template_coverage": round_float(detail.connector_validation.template_coverage),
                     "connector_patch_coverage": round_float(detail.connector_validation.patch_coverage),
+                    "refine_score": round_float(detail.refine_score),
+                    "refinement_dx": detail.refinement_shift[0],
+                    "refinement_dy": detail.refinement_shift[1],
+                    "refinement_scale": round_float(detail.refinement_scale),
+                    "coarse_x": detail.coarse_box[0],
+                    "coarse_y": detail.coarse_box[1],
+                    "coarse_w": detail.coarse_box[2],
+                    "coarse_h": detail.coarse_box[3],
                     "final_confidence": round_float(detail.detection.confidence),
                 }
             )
@@ -484,6 +552,72 @@ class PatternDetector:
 def _refinement_offsets(radius: int) -> list[int]:
     radius = max(0, int(radius))
     return list(range(-radius, radius + 1))
+
+
+def _resize_edge_template(template_edge: np.ndarray, scale_multiplier: float) -> np.ndarray:
+    edge = np.where(template_edge > 0, 255, 0).astype(np.uint8)
+    if abs(scale_multiplier - 1.0) < 1e-9:
+        return edge
+
+    h, w = edge.shape[:2]
+    new_w = max(3, int(round(w * scale_multiplier)))
+    new_h = max(3, int(round(h * scale_multiplier)))
+    return cv2.resize(edge, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+
+def _prepare_refinement_patch(
+    scaled_template: np.ndarray,
+    drawing_skeleton: np.ndarray,
+    *,
+    x: int,
+    y: int,
+    padding: int,
+) -> dict[str, Any] | None:
+    draw_h, draw_w = drawing_skeleton.shape[:2]
+    template_h, template_w = scaled_template.shape[:2]
+    if template_h <= 0 or template_w <= 0:
+        return None
+
+    x1 = x
+    y1 = y
+    x2 = x + template_w
+    y2 = y + template_h
+    if x2 <= 0 or y2 <= 0 or x1 >= draw_w or y1 >= draw_h:
+        return None
+
+    pad = max(0, int(padding))
+    patch_x1 = clamp(x1 - pad, 0, draw_w - 1)
+    patch_y1 = clamp(y1 - pad, 0, draw_h - 1)
+    patch_x2 = clamp(x2 + pad, patch_x1 + 1, draw_w)
+    patch_y2 = clamp(y2 + pad, patch_y1 + 1, draw_h)
+    patch = drawing_skeleton[patch_y1:patch_y2, patch_x1:patch_x2]
+    if patch.size == 0:
+        return None
+
+    template_canvas = np.zeros(patch.shape[:2], dtype=np.uint8)
+    dst_x1 = max(0, x1 - patch_x1)
+    dst_y1 = max(0, y1 - patch_y1)
+    src_x1 = max(0, patch_x1 - x1)
+    src_y1 = max(0, patch_y1 - y1)
+    copy_w = min(template_w - src_x1, template_canvas.shape[1] - dst_x1)
+    copy_h = min(template_h - src_y1, template_canvas.shape[0] - dst_y1)
+    if copy_w <= 0 or copy_h <= 0:
+        return None
+    template_canvas[dst_y1 : dst_y1 + copy_h, dst_x1 : dst_x1 + copy_w] = scaled_template[
+        src_y1 : src_y1 + copy_h,
+        src_x1 : src_x1 + copy_w,
+    ]
+
+    core_edge, connector_edge, weight_mask = split_template_core_and_connectors(template_canvas)
+    template_weight = np.where(template_canvas > 0, weight_mask, 0.0).astype(np.float32)
+    return {
+        "patch": patch,
+        "template": template_canvas,
+        "core_edge": core_edge,
+        "connector_edge": connector_edge,
+        "template_weight": template_weight,
+        "bbox": (patch_x1, patch_y1, patch_x2 - patch_x1, patch_y2 - patch_y1),
+    }
 
 
 def split_template_core_and_connectors(template_edge: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -691,4 +825,33 @@ def _core_connector_overlay(core_edge: np.ndarray, connector_edge: np.ndarray) -
     vis[core] = (0, 255, 0)
     vis[connector] = (0, 80, 255)
     vis[np.logical_and(core, connector)] = (255, 255, 255)
+    return vis
+
+
+def _refinement_overlay(coarse_box: tuple[int, int, int, int], refined: Detection) -> np.ndarray:
+    cx, cy, cw, ch = coarse_box
+    rx, ry, rw, rh = refined.x, refined.y, refined.w, refined.h
+    min_x = min(cx, rx)
+    min_y = min(cy, ry)
+    max_x = max(cx + cw, rx + rw)
+    max_y = max(cy + ch, ry + rh)
+    margin = 8
+    width = max(32, max_x - min_x + (2 * margin))
+    height = max(32, max_y - min_y + (2 * margin))
+    vis = np.zeros((height, width, 3), dtype=np.uint8)
+
+    coarse_pt1 = (cx - min_x + margin, cy - min_y + margin)
+    coarse_pt2 = (cx + cw - min_x + margin, cy + ch - min_y + margin)
+    refined_pt1 = (rx - min_x + margin, ry - min_y + margin)
+    refined_pt2 = (rx + rw - min_x + margin, ry + rh - min_y + margin)
+    cv2.rectangle(vis, coarse_pt1, coarse_pt2, (255, 80, 0), 1)
+    cv2.rectangle(vis, refined_pt1, refined_pt2, (0, 180, 255), 1)
+    cv2.arrowedLine(
+        vis,
+        ((coarse_pt1[0] + coarse_pt2[0]) // 2, (coarse_pt1[1] + coarse_pt2[1]) // 2),
+        ((refined_pt1[0] + refined_pt2[0]) // 2, (refined_pt1[1] + refined_pt2[1]) // 2),
+        (0, 255, 255),
+        1,
+        tipLength=0.25,
+    )
     return vis

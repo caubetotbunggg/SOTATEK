@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-extra-patch-ratio", type=float, default=0.90, help="Maximum extra patch edge ratio")
     parser.add_argument("--validation-dilation-iterations", type=int, default=2, help="Edge validation dilation iterations")
     parser.add_argument("--local-refinement-radius", type=int, default=4, help="Local bbox refinement radius in pixels")
+    parser.add_argument("--validation-padding", type=int, default=3, help="Padding around refined bbox during validation")
     parser.add_argument("--max-detections", type=int, default=200, help="Maximum boxes after NMS")
     parser.add_argument("--pattern-padding", type=int, default=4, help="Foreground crop padding for pattern")
     parser.add_argument("--enable-debug", action="store_true", help="Save preprocessing and debug visualization images")
@@ -60,6 +61,7 @@ def main() -> None:
         max_extra_patch_ratio=args.max_extra_patch_ratio,
         validation_dilation_iterations=args.validation_dilation_iterations,
         local_refinement_radius=args.local_refinement_radius,
+        validation_padding=args.validation_padding,
         max_detections=args.max_detections,
         pattern_padding=args.pattern_padding,
         enable_debug=args.enable_debug,

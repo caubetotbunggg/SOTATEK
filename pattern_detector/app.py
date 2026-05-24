@@ -40,6 +40,7 @@ def run_detection(
     max_extra_patch_ratio: float,
     validation_dilation_iterations: int,
     local_refinement_radius: int,
+    validation_padding: int,
     enable_debug: bool,
 ) -> tuple[np.ndarray | None, str, str]:
     start = time.perf_counter()
@@ -65,6 +66,7 @@ def run_detection(
         max_extra_patch_ratio=max_extra_patch_ratio,
         validation_dilation_iterations=int(validation_dilation_iterations),
         local_refinement_radius=int(local_refinement_radius),
+        validation_padding=int(validation_padding),
         enable_debug=enable_debug,
     )
     detector = PatternDetector(config)
@@ -134,6 +136,7 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
         with gr.Row():
             validation_dilation_iterations = gr.Slider(0, 5, value=2, step=1, label="Validation dilation iterations")
             local_refinement_radius = gr.Slider(0, 8, value=4, step=1, label="Local refinement radius")
+            validation_padding = gr.Slider(0, 8, value=3, step=1, label="Validation padding")
 
     run_button = gr.Button("Detect", variant="primary")
 
@@ -166,6 +169,7 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
             max_extra_patch_ratio,
             validation_dilation_iterations,
             local_refinement_radius,
+            validation_padding,
             enable_debug,
         ],
         outputs=[output_image, output_json, runtime],
