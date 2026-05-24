@@ -77,6 +77,16 @@ Useful tuning options:
 - `--nms-iou`: suppresses overlapping detections.
 - `--enable-debug`: saves preprocessing and debug images.
 
+## Matching Branches
+
+The detector now combines three CPU-friendly matching branches:
+
+- **Descriptor branch**: the existing fast candidate search using edge-orientation descriptors, followed by Chamfer and edge-F1 validation.
+- **Skeleton direct branch**: compares transformed skeleton templates directly against drawing skeleton patches using foreground IoU, Chamfer similarity, XOR similarity, and density.
+- **Binary direct branch**: compares transformed thresholded foreground templates against thresholded drawing patches without skeletonization, using masked NCC plus foreground IoU, XOR, and density.
+
+Candidates from all enabled branches are merged before NMS. Boxes supported by multiple branches receive a small confidence boost, so a detection found by descriptor + skeleton direct + binary direct ranks above a similar one-branch candidate.
+
 ## Debug Outputs
 
 When `--enable-debug` is set, images are saved to `outputs/debug/`:
@@ -89,6 +99,10 @@ When `--enable-debug` is set, images are saved to `outputs/debug/`:
 - `candidates_before_nms.png`
 - `final_result.png`
 - `descriptor_heatmap_s1_r0.png` when scale `1.0` and rotation `0` are searched
+- `skeleton_direct_candidates_before_nms.png`
+- `binary_direct_candidates_before_nms.png`
+- `merged_candidates_before_nms.png`
+- `branch_summary.json`
 
 ## Gradio Usage
 

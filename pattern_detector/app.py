@@ -41,6 +41,14 @@ def run_detection(
     validation_dilation_iterations: int,
     local_refinement_radius: int,
     validation_padding: int,
+    enable_descriptor_branch: bool,
+    enable_skeleton_direct_branch: bool,
+    enable_binary_direct_branch: bool,
+    direct_match_top_k: int,
+    direct_match_stride: int,
+    direct_match_dilation: int,
+    branch_support_iou: float,
+    multi_branch_boost: float,
     enable_debug: bool,
 ) -> tuple[np.ndarray | None, str, str]:
     start = time.perf_counter()
@@ -67,6 +75,14 @@ def run_detection(
         validation_dilation_iterations=int(validation_dilation_iterations),
         local_refinement_radius=int(local_refinement_radius),
         validation_padding=int(validation_padding),
+        enable_descriptor_branch=enable_descriptor_branch,
+        enable_skeleton_direct_branch=enable_skeleton_direct_branch,
+        enable_binary_direct_branch=enable_binary_direct_branch,
+        direct_match_top_k=int(direct_match_top_k),
+        direct_match_stride=int(direct_match_stride),
+        direct_match_dilation=int(direct_match_dilation),
+        branch_support_iou=branch_support_iou,
+        multi_branch_boost=multi_branch_boost,
         enable_debug=enable_debug,
     )
     detector = PatternDetector(config)
@@ -125,6 +141,11 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
         top_k = gr.Slider(20, 1000, value=800, step=20, label="Top K per variant")
         enable_debug = gr.Checkbox(value=False, label="Enable debug images")
 
+    with gr.Row():
+        enable_descriptor_branch = gr.Checkbox(value=True, label="Enable descriptor branch")
+        enable_skeleton_direct_branch = gr.Checkbox(value=True, label="Enable skeleton direct branch")
+        enable_binary_direct_branch = gr.Checkbox(value=True, label="Enable binary direct branch")
+
     with gr.Accordion("Advanced validation", open=False):
         with gr.Row():
             chamfer_sigma = gr.Slider(1.0, 20.0, value=8.0, step=0.5, label="Chamfer sigma")
@@ -137,6 +158,13 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
             validation_dilation_iterations = gr.Slider(0, 5, value=2, step=1, label="Validation dilation iterations")
             local_refinement_radius = gr.Slider(0, 8, value=4, step=1, label="Local refinement radius")
             validation_padding = gr.Slider(0, 8, value=3, step=1, label="Validation padding")
+        with gr.Row():
+            direct_match_top_k = gr.Slider(20, 1000, value=500, step=20, label="Direct match top K")
+            direct_match_stride = gr.Slider(1, 16, value=2, step=1, label="Direct match stride")
+            direct_match_dilation = gr.Slider(0, 5, value=1, step=1, label="Direct match dilation")
+        with gr.Row():
+            branch_support_iou = gr.Slider(0.1, 0.9, value=0.50, step=0.01, label="Branch support IoU")
+            multi_branch_boost = gr.Slider(0.0, 0.3, value=0.08, step=0.01, label="Multi-branch boost")
 
     run_button = gr.Button("Detect", variant="primary")
 
@@ -170,6 +198,14 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
             validation_dilation_iterations,
             local_refinement_radius,
             validation_padding,
+            enable_descriptor_branch,
+            enable_skeleton_direct_branch,
+            enable_binary_direct_branch,
+            direct_match_top_k,
+            direct_match_stride,
+            direct_match_dilation,
+            branch_support_iou,
+            multi_branch_boost,
             enable_debug,
         ],
         outputs=[output_image, output_json, runtime],

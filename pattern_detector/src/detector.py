@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from .descriptor_matching import (
     parse_rotations,
     sliding_window_descriptor_search,
 )
+from .direct_matcher import DirectMatchCandidate, run_binary_direct_branch, run_skeleton_direct_branch
 from .nms import non_max_suppression
 from .preprocessing import (
     load_image,
@@ -54,6 +55,13 @@ class Detection:
     core_chamfer_similarity: float = 0.0
     connector_chamfer_similarity: float = 0.0
     shape_score: float = 0.0
+    branches: list[str] = field(default_factory=list)
+    branch_scores: dict[str, float] = field(default_factory=dict)
+    skeleton_direct_score: float = 0.0
+    binary_direct_score: float = 0.0
+    edge_iou: float = 0.0
+    xor_similarity: float = 0.0
+    ncc_score: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -74,8 +82,16 @@ class Detection:
             "core_chamfer_similarity",
             "connector_chamfer_similarity",
             "shape_score",
+            "skeleton_direct_score",
+            "binary_direct_score",
+            "edge_iou",
+            "xor_similarity",
+            "ncc_score",
         ):
             data[key] = round_float(float(data[key]))
+        data["branch_scores"] = {
+            key: round_float(float(value)) for key, value in data["branch_scores"].items()
+        }
         return data
 
 
@@ -114,6 +130,25 @@ class DetectorConfig:
     validation_dilation_iterations: int = 2
     local_refinement_radius: int = 4
     validation_padding: int = 3
+    enable_descriptor_branch: bool = True
+    enable_skeleton_direct_branch: bool = True
+    enable_binary_direct_branch: bool = True
+    direct_match_top_k: int = 500
+    direct_match_stride: int = 2
+    direct_match_dilation: int = 1
+    branch_support_iou: float = 0.50
+    multi_branch_boost: float = 0.08
+    max_branch_boost: float = 0.16
+    skeleton_direct_weight_iou: float = 0.45
+    skeleton_direct_weight_chamfer: float = 0.35
+    skeleton_direct_weight_xor: float = 0.15
+    skeleton_direct_weight_density: float = 0.05
+    binary_direct_weight_ncc: float = 0.35
+    binary_direct_weight_iou: float = 0.30
+    binary_direct_weight_xor: float = 0.20
+    binary_direct_weight_density: float = 0.15
+    binary_direct_use_edges: bool = False
+    binary_direct_use_masked_ncc: bool = True
     max_detections: int = 200
     pattern_padding: int = 4
     enable_debug: bool = False
@@ -172,28 +207,52 @@ class PatternDetector:
             rotations=rotations,
             drawing_shape=drawing.skeleton.shape,
         )
-
-        descriptor_candidates, search_debug = sliding_window_descriptor_search(
-            drawing.skeleton,
-            variants,
-            stride=cfg.stride,
-            top_k=cfg.top_k,
-            heatmap_variant=(1.0, 0.0),
+        binary_variants = generate_edge_template_variants(
+            pattern.binary,
+            min_scale=cfg.min_scale,
+            max_scale=cfg.max_scale,
+            scale_step=cfg.scale_step,
+            rotations=rotations,
+            drawing_shape=drawing.binary.shape,
         )
+
+        descriptor_candidates: list[DescriptorCandidate] = []
+        search_debug = DescriptorSearchDebug()
+        if cfg.enable_descriptor_branch:
+            descriptor_candidates, search_debug = sliding_window_descriptor_search(
+                drawing.skeleton,
+                variants,
+                stride=cfg.stride,
+                top_k=cfg.top_k,
+                heatmap_variant=(1.0, 0.0),
+            )
 
         scored: list[Detection] = []
         debug_details: list[CandidateDebug] = []
         num_after_chamfer_extreme_filter = 0
-        for candidate in descriptor_candidates:
-            detection, survived_chamfer_extreme, debug_detail = self._validate_candidate(candidate, drawing.skeleton)
-            if survived_chamfer_extreme:
-                num_after_chamfer_extreme_filter += 1
-            if detection is not None:
-                scored.append(detection)
-                if debug_detail is not None:
-                    debug_details.append(debug_detail)
+        if cfg.enable_descriptor_branch:
+            for candidate in descriptor_candidates:
+                detection, survived_chamfer_extreme, debug_detail = self._validate_candidate(candidate, drawing.skeleton)
+                if survived_chamfer_extreme:
+                    num_after_chamfer_extreme_filter += 1
+                if detection is not None:
+                    detection.branches = ["descriptor"]
+                    detection.branch_scores = {"descriptor": detection.confidence}
+                    scored.append(detection)
+                    if debug_detail is not None:
+                        debug_details.append(debug_detail)
 
-        validated = [det for det in scored if det.confidence >= cfg.threshold]
+        skeleton_direct_candidates: list[DirectMatchCandidate] = []
+        binary_direct_candidates: list[DirectMatchCandidate] = []
+        if cfg.enable_skeleton_direct_branch:
+            skeleton_direct_candidates = run_skeleton_direct_branch(drawing.skeleton, variants, cfg)
+            scored.extend(_direct_candidates_to_detections(skeleton_direct_candidates))
+        if cfg.enable_binary_direct_branch:
+            binary_direct_candidates = run_binary_direct_branch(drawing.binary, binary_variants, cfg)
+            scored.extend(_direct_candidates_to_detections(binary_direct_candidates))
+
+        merged = merge_branch_candidates(scored, cfg)
+        validated = [det for det in merged if det.confidence >= cfg.threshold]
         before_validation = [
             self._map_to_original(det, drawing.scale_to_original, drawing.original_bgr.shape)
             for det in self._raw_candidates_to_detections(descriptor_candidates)
@@ -212,9 +271,17 @@ class PatternDetector:
             "num_raw_candidates": len(descriptor_candidates),
             "num_after_chamfer_extreme_filter": num_after_chamfer_extreme_filter,
             "num_after_validation_scoring": len(scored),
+            "num_merged_candidates": len(merged),
             "num_above_threshold": len(validated),
             "num_after_nms": len(suppressed),
         }
+        branch_summary = _branch_summary(
+            descriptor=scored,
+            skeleton_direct=skeleton_direct_candidates,
+            binary_direct=binary_direct_candidates,
+            merged=merged,
+            after_nms=suppressed,
+        )
 
         if cfg.enable_debug:
             self._print_debug_counts()
@@ -225,6 +292,9 @@ class PatternDetector:
                 visualization,
                 search_debug,
                 sorted(debug_details, key=lambda item: item.detection.confidence, reverse=True),
+                skeleton_direct_candidates,
+                binary_direct_candidates,
+                branch_summary,
             )
 
         return mapped, visualization
@@ -418,6 +488,9 @@ class PatternDetector:
         final_visualization: np.ndarray,
         search_debug: DescriptorSearchDebug,
         debug_details: list[CandidateDebug],
+        skeleton_direct_candidates: list[DirectMatchCandidate],
+        binary_direct_candidates: list[DirectMatchCandidate],
+        branch_summary: dict[str, Any],
     ) -> None:
         debug_dir = Path(self.config.debug_dir)
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -425,7 +498,12 @@ class PatternDetector:
         before_nms_vis = draw_detections(drawing_bgr, before_nms)
         save_visualization(before_validation_vis, str(debug_dir / "candidates_before_validation.png"))
         save_visualization(before_nms_vis, str(debug_dir / "candidates_after_validation_before_nms.png"))
+        save_visualization(draw_detections(drawing_bgr, skeleton_direct_candidates), str(debug_dir / "skeleton_direct_candidates_before_nms.png"))
+        save_visualization(draw_detections(drawing_bgr, binary_direct_candidates), str(debug_dir / "binary_direct_candidates_before_nms.png"))
+        save_visualization(before_nms_vis, str(debug_dir / "merged_candidates_before_nms.png"))
         save_visualization(final_visualization, str(debug_dir / "final_result.png"))
+        with open(debug_dir / "branch_summary.json", "w", encoding="utf-8") as f:
+            json.dump(branch_summary, f, indent=2)
 
         if search_debug.heatmap is not None and search_debug.heatmap.size:
             heatmap = np.clip(search_debug.heatmap, 0.0, 1.0)
@@ -474,6 +552,8 @@ class PatternDetector:
                 core_chamfer_similarity=0.0,
                 connector_chamfer_similarity=0.0,
                 shape_score=0.0,
+                branches=[],
+                branch_scores={},
             )
             for candidate in candidates
         ]
@@ -509,6 +589,13 @@ class PatternDetector:
             core_chamfer_similarity=det.core_chamfer_similarity,
             connector_chamfer_similarity=det.connector_chamfer_similarity,
             shape_score=det.shape_score,
+            branches=list(det.branches),
+            branch_scores=dict(det.branch_scores),
+            skeleton_direct_score=det.skeleton_direct_score,
+            binary_direct_score=det.binary_direct_score,
+            edge_iou=det.edge_iou,
+            xor_similarity=det.xor_similarity,
+            ncc_score=det.ncc_score,
         )
 
     def _save_candidate_debug(self, debug_dir: Path, debug_details: list[CandidateDebug]) -> None:
@@ -552,6 +639,113 @@ class PatternDetector:
 def _refinement_offsets(radius: int) -> list[int]:
     radius = max(0, int(radius))
     return list(range(-radius, radius + 1))
+
+
+def _direct_candidates_to_detections(candidates: list[DirectMatchCandidate]) -> list[Detection]:
+    detections: list[Detection] = []
+    for candidate in candidates:
+        detection = Detection(
+            x=candidate.x,
+            y=candidate.y,
+            w=candidate.w,
+            h=candidate.h,
+            confidence=candidate.score,
+            scale=candidate.scale,
+            rotation=candidate.rotation,
+            descriptor_similarity=0.0,
+            chamfer_similarity=candidate.chamfer_similarity,
+            edge_f1=0.0,
+            density_score=candidate.density_score,
+            template_coverage=0.0,
+            patch_coverage=0.0,
+            extra_patch_ratio=0.0,
+            chamfer_distance=0.0,
+            branches=[candidate.branch],
+            branch_scores={candidate.branch: candidate.score},
+            skeleton_direct_score=candidate.score if candidate.branch == "skeleton_direct" else 0.0,
+            binary_direct_score=candidate.score if candidate.branch == "binary_direct" else 0.0,
+            edge_iou=candidate.edge_iou,
+            xor_similarity=candidate.xor_similarity,
+            ncc_score=candidate.ncc_score,
+        )
+        detections.append(detection)
+    return detections
+
+
+def merge_branch_candidates(candidates: list[Detection], cfg: DetectorConfig) -> list[Detection]:
+    remaining = sorted(candidates, key=lambda det: det.confidence, reverse=True)
+    merged: list[Detection] = []
+    while remaining:
+        seed = remaining.pop(0)
+        group = [seed]
+        keep: list[Detection] = []
+        for candidate in remaining:
+            if _detection_iou(seed, candidate) >= cfg.branch_support_iou:
+                group.append(candidate)
+            else:
+                keep.append(candidate)
+        remaining = keep
+
+        best = max(group, key=lambda det: det.confidence)
+        branches = sorted({branch for det in group for branch in det.branches})
+        branch_scores: dict[str, float] = {}
+        for det in group:
+            for branch, score in det.branch_scores.items():
+                branch_scores[branch] = max(branch_scores.get(branch, 0.0), float(score))
+        boost = min(max(0, len(branches) - 1) * cfg.multi_branch_boost, cfg.max_branch_boost)
+        best.confidence = float(np.clip(max(det.confidence for det in group) + boost, 0.0, 1.0))
+        best.branches = branches
+        best.branch_scores = branch_scores
+        best.skeleton_direct_score = branch_scores.get("skeleton_direct", best.skeleton_direct_score)
+        best.binary_direct_score = branch_scores.get("binary_direct", best.binary_direct_score)
+        best.edge_iou = max((det.edge_iou for det in group), default=best.edge_iou)
+        best.xor_similarity = max((det.xor_similarity for det in group), default=best.xor_similarity)
+        best.ncc_score = max((det.ncc_score for det in group), default=best.ncc_score)
+        merged.append(best)
+    return merged
+
+
+def _detection_iou(a: Detection, b: Detection) -> float:
+    ax1, ay1 = a.x, a.y
+    ax2, ay2 = a.x + a.w, a.y + a.h
+    bx1, by1 = b.x, b.y
+    bx2, by2 = b.x + b.w, b.y + b.h
+    inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0, min(ay2, by2) - max(ay1, by1))
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    union = (a.w * a.h) + (b.w * b.h) - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
+def _branch_summary(
+    *,
+    descriptor: list[Detection],
+    skeleton_direct: list[DirectMatchCandidate],
+    binary_direct: list[DirectMatchCandidate],
+    merged: list[Detection],
+    after_nms: list[Detection],
+) -> dict[str, Any]:
+    descriptor_only = [det for det in descriptor if "descriptor" in det.branch_scores]
+    return {
+        "descriptor": {
+            "num_candidates": len(descriptor_only),
+            "top_score": round_float(max((det.branch_scores.get("descriptor", 0.0) for det in descriptor_only), default=0.0)),
+        },
+        "skeleton_direct": {
+            "num_candidates": len(skeleton_direct),
+            "top_score": round_float(max((candidate.score for candidate in skeleton_direct), default=0.0)),
+        },
+        "binary_direct": {
+            "num_candidates": len(binary_direct),
+            "top_score": round_float(max((candidate.score for candidate in binary_direct), default=0.0)),
+        },
+        "merged": {
+            "num_candidates": len(merged),
+            "num_after_nms": len(after_nms),
+        },
+    }
 
 
 def _resize_edge_template(template_edge: np.ndarray, scale_multiplier: float) -> np.ndarray:

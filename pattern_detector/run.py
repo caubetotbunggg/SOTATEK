@@ -33,6 +33,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-dilation-iterations", type=int, default=2, help="Edge validation dilation iterations")
     parser.add_argument("--local-refinement-radius", type=int, default=4, help="Local bbox refinement radius in pixels")
     parser.add_argument("--validation-padding", type=int, default=3, help="Padding around refined bbox during validation")
+    parser.add_argument("--enable-descriptor-branch", dest="enable_descriptor_branch", action="store_true", default=True)
+    parser.add_argument("--disable-descriptor-branch", dest="enable_descriptor_branch", action="store_false")
+    parser.add_argument("--enable-skeleton-direct-branch", dest="enable_skeleton_direct_branch", action="store_true", default=True)
+    parser.add_argument("--disable-skeleton-direct-branch", dest="enable_skeleton_direct_branch", action="store_false")
+    parser.add_argument("--enable-binary-direct-branch", dest="enable_binary_direct_branch", action="store_true", default=True)
+    parser.add_argument("--disable-binary-direct-branch", dest="enable_binary_direct_branch", action="store_false")
+    parser.add_argument("--direct-match-top-k", type=int, default=500, help="Top direct-match candidates to keep per variant")
+    parser.add_argument("--direct-match-stride", type=int, default=2, help="Direct-match sliding-window stride")
+    parser.add_argument("--direct-match-dilation", type=int, default=1, help="Direct-match dilation tolerance")
+    parser.add_argument("--branch-support-iou", type=float, default=0.50, help="IoU threshold for multi-branch support")
+    parser.add_argument("--multi-branch-boost", type=float, default=0.08, help="Confidence boost per additional supporting branch")
     parser.add_argument("--max-detections", type=int, default=200, help="Maximum boxes after NMS")
     parser.add_argument("--pattern-padding", type=int, default=4, help="Foreground crop padding for pattern")
     parser.add_argument("--enable-debug", action="store_true", help="Save preprocessing and debug visualization images")
@@ -62,6 +73,14 @@ def main() -> None:
         validation_dilation_iterations=args.validation_dilation_iterations,
         local_refinement_radius=args.local_refinement_radius,
         validation_padding=args.validation_padding,
+        enable_descriptor_branch=args.enable_descriptor_branch,
+        enable_skeleton_direct_branch=args.enable_skeleton_direct_branch,
+        enable_binary_direct_branch=args.enable_binary_direct_branch,
+        direct_match_top_k=args.direct_match_top_k,
+        direct_match_stride=args.direct_match_stride,
+        direct_match_dilation=args.direct_match_dilation,
+        branch_support_iou=args.branch_support_iou,
+        multi_branch_boost=args.multi_branch_boost,
         max_detections=args.max_detections,
         pattern_padding=args.pattern_padding,
         enable_debug=args.enable_debug,
