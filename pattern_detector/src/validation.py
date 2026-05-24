@@ -23,8 +23,10 @@ def validate_edge_candidate(
     patch_edge: np.ndarray,
     *,
     min_template_coverage: float = 0.60,
+    min_patch_coverage: float = 0.0,
     max_extra_patch_ratio: float = 0.55,
     dilation_iterations: int = 0,
+    center_weight: np.ndarray | None = None,
 ) -> ValidationScores:
     """Validate shape match between template and patch.
 
@@ -52,9 +54,10 @@ def validate_edge_candidate(
 
     template_mask = template > 0
     patch_mask = patch > 0
+    weights = _ensure_weight_mask(center_weight, template.shape[:2])
 
-    total_template_edges = float(template_mask.sum())
-    total_patch_edges = float(patch_mask.sum())
+    total_template_edges = float(weights[template_mask].sum())
+    total_patch_edges = float(weights[patch_mask].sum())
     eps = 1e-8
 
     if total_template_edges <= 0 or total_patch_edges <= 0:
@@ -67,8 +70,8 @@ def validate_edge_candidate(
             passed=False,
         )
 
-    matched_template_edges = float(np.logical_and(template_mask, patch_match_area).sum())
-    matched_patch_edges = float(np.logical_and(patch_mask, template_match_area).sum())
+    matched_template_edges = float(weights[np.logical_and(template_mask, patch_match_area)].sum())
+    matched_patch_edges = float(weights[np.logical_and(patch_mask, template_match_area)].sum())
 
     template_coverage = matched_template_edges / (total_template_edges + eps)
     patch_coverage = matched_patch_edges / (total_patch_edges + eps)
@@ -86,6 +89,7 @@ def validate_edge_candidate(
 
     passed = (
         template_coverage >= min_template_coverage
+        and patch_coverage >= min_patch_coverage
         and extra_patch_ratio <= max_extra_patch_ratio
     )
 
@@ -109,3 +113,14 @@ def _ensure_same_size_binary(edge_img: np.ndarray, target_shape: tuple[int, int]
     if edge.shape[:2] == (target_h, target_w):
         return edge
     return cv2.resize(edge, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+
+
+def _ensure_weight_mask(weight_mask: np.ndarray | None, target_shape: tuple[int, int]) -> np.ndarray:
+    target_h, target_w = target_shape
+    if weight_mask is None:
+        return np.ones((target_h, target_w), dtype=np.float32)
+
+    weights = np.asarray(weight_mask, dtype=np.float32)
+    if weights.shape[:2] != (target_h, target_w):
+        weights = cv2.resize(weights, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+    return np.clip(weights, 0.0, None).astype(np.float32)
