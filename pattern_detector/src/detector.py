@@ -392,6 +392,7 @@ class PatternDetector:
         save_visualization(_edge_to_bgr(core_edge), str(debug_dir / "template_core_edge.png"))
         save_visualization(_edge_to_bgr(connector_edge), str(debug_dir / "template_connector_edge.png"))
         save_visualization(_gray_to_bgr((weight_mask * 255).astype(np.uint8)), str(debug_dir / "template_weight_mask.png"))
+        save_visualization(_core_connector_overlay(core_edge, connector_edge), str(debug_dir / "template_core_connector_overlay.png"))
 
     @staticmethod
     def _raw_candidates_to_detections(candidates: list[DescriptorCandidate]) -> list[Detection]:
@@ -488,17 +489,10 @@ def _refinement_offsets(radius: int) -> list[int]:
 def split_template_core_and_connectors(template_edge: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     template = np.where(template_edge > 0, 255, 0).astype(np.uint8)
     h, w = template.shape[:2]
-    yy, xx = np.mgrid[0:h, 0:w]
     edge_mask = template > 0
 
-    horizontal_connector = (
-        np.abs(yy.astype(np.float32) - (h / 2.0)) < (0.12 * h)
-    ) & ((xx < (0.20 * w)) | (xx > (0.80 * w)))
-    vertical_connector = (
-        np.abs(xx.astype(np.float32) - (w / 2.0)) < (0.12 * w)
-    ) & ((yy < (0.20 * h)) | (yy > (0.80 * h)))
-
-    connector_mask = edge_mask & (horizontal_connector | vertical_connector)
+    connector_line_mask = _dominant_connector_line_mask(template)
+    connector_mask = edge_mask & connector_line_mask
     core_mask = edge_mask & ~connector_mask
 
     core_edge = np.where(core_mask, 255, 0).astype(np.uint8)
@@ -507,6 +501,102 @@ def split_template_core_and_connectors(template_edge: np.ndarray) -> tuple[np.nd
     weight_mask[core_mask] = 1.0
     weight_mask[connector_mask] = 0.20
     return core_edge, connector_edge, weight_mask
+
+
+def _dominant_connector_line_mask(template: np.ndarray) -> np.ndarray:
+    h, w = template.shape[:2]
+    line_mask = np.zeros((h, w), dtype=np.uint8)
+    max_dim = max(h, w)
+    threshold = max(4, int(round(max_dim * 0.10)))
+    min_line_length = max(6, int(round(max_dim * 0.45)))
+    max_line_gap = max(2, int(round(max_dim * 0.08)))
+
+    lines = cv2.HoughLinesP(
+        template,
+        rho=1,
+        theta=np.pi / 180.0,
+        threshold=threshold,
+        minLineLength=min_line_length,
+        maxLineGap=max_line_gap,
+    )
+    if lines is not None:
+        for line in lines[:, 0, :]:
+            x1, y1, x2, y2 = [int(value) for value in line]
+            if _is_dominant_connector_line(x1, y1, x2, y2, h, w):
+                cv2.line(line_mask, (x1, y1), (x2, y2), 255, 1)
+
+    projection_mask = _projection_connector_line_mask(template)
+    line_mask = cv2.bitwise_or(line_mask, projection_mask)
+
+    if not np.any(line_mask):
+        return np.zeros((h, w), dtype=bool)
+
+    kernel = np.ones((3, 3), np.uint8)
+    line_mask = cv2.dilate(line_mask, kernel, iterations=1)
+    return line_mask > 0
+
+
+def _is_dominant_connector_line(x1: int, y1: int, x2: int, y2: int, h: int, w: int) -> bool:
+    dx = float(x2 - x1)
+    dy = float(y2 - y1)
+    length = float(np.hypot(dx, dy))
+    if length <= 0:
+        return False
+
+    angle = abs(np.degrees(np.arctan2(dy, dx))) % 180.0
+    x_min, x_max = min(x1, x2), max(x1, x2)
+    y_min, y_max = min(y1, y2), max(y1, y2)
+    x_mid = (x1 + x2) / 2.0
+    y_mid = (y1 + y2) / 2.0
+
+    is_horizontal = angle <= 12.0 or angle >= 168.0
+    is_vertical = 78.0 <= angle <= 102.0
+    horizontal_through_center = (
+        is_horizontal
+        and length >= 0.45 * w
+        and abs(y_mid - (h / 2.0)) <= 0.18 * h
+        and x_min <= 0.22 * w
+        and x_max >= 0.78 * w
+    )
+    vertical_through_center = (
+        is_vertical
+        and length >= 0.45 * h
+        and abs(x_mid - (w / 2.0)) <= 0.18 * w
+        and y_min <= 0.22 * h
+        and y_max >= 0.78 * h
+    )
+    return horizontal_through_center or vertical_through_center
+
+
+def _projection_connector_line_mask(template: np.ndarray) -> np.ndarray:
+    h, w = template.shape[:2]
+    edge = template > 0
+    line_mask = np.zeros((h, w), dtype=np.uint8)
+
+    center_y = (h - 1) / 2.0
+    center_x = (w - 1) / 2.0
+    horizontal_band = max(1, int(round(0.12 * h)))
+    vertical_band = max(1, int(round(0.12 * w)))
+
+    for y in range(h):
+        if abs(y - center_y) > horizontal_band:
+            continue
+        xs = np.flatnonzero(edge[y, :])
+        if xs.size < max(3, int(round(0.20 * w))):
+            continue
+        if xs[0] <= 0.22 * w and xs[-1] >= 0.78 * w and (xs[-1] - xs[0]) >= 0.45 * w:
+            cv2.line(line_mask, (int(xs[0]), y), (int(xs[-1]), y), 255, 1)
+
+    for x in range(w):
+        if abs(x - center_x) > vertical_band:
+            continue
+        ys = np.flatnonzero(edge[:, x])
+        if ys.size < max(3, int(round(0.20 * h))):
+            continue
+        if ys[0] <= 0.22 * h and ys[-1] >= 0.78 * h and (ys[-1] - ys[0]) >= 0.45 * h:
+            cv2.line(line_mask, (x, int(ys[0])), (x, int(ys[-1])), 255, 1)
+
+    return line_mask
 
 
 def _weighted_chamfer_scores(
@@ -591,4 +681,14 @@ def _overlap_visualization(template_edge: np.ndarray, patch_edge: np.ndarray) ->
     vis[np.logical_and(template, patch)] = (0, 255, 0)
     vis[np.logical_and(template, ~patch)] = (0, 0, 255)
     vis[np.logical_and(~template, patch)] = (255, 0, 0)
+    return vis
+
+
+def _core_connector_overlay(core_edge: np.ndarray, connector_edge: np.ndarray) -> np.ndarray:
+    core = core_edge > 0
+    connector = connector_edge > 0
+    vis = np.zeros((*core.shape[:2], 3), dtype=np.uint8)
+    vis[core] = (0, 255, 0)
+    vis[connector] = (0, 80, 255)
+    vis[np.logical_and(core, connector)] = (255, 255, 255)
     return vis
