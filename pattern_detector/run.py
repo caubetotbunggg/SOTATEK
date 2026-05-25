@@ -4,6 +4,7 @@ import argparse
 import time
 
 from src.detector import DetectorConfig, PatternDetector
+from src.raw_sliding_window import RawSlidingWindowConfig, detect_raw_sliding_window
 from src.utils import save_json
 from src.visualization import save_visualization
 
@@ -14,14 +15,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--drawing", required=True, help="Path to drawing image")
     parser.add_argument("--output", default="outputs/result.png", help="Path for visualization image")
     parser.add_argument("--json", default="outputs/result.json", help="Path for JSON detections")
+    parser.add_argument("--method", choices=["existing", "raw_sliding_window"], default="existing", help="Detection method")
     parser.add_argument("--threshold", type=float, default=0.35, help="Final confidence threshold")
-    parser.add_argument("--min-scale", type=float, default=0.05, help="Minimum template scale")
-    parser.add_argument("--max-scale", type=float, default=0.30, help="Maximum template scale")
-    parser.add_argument("--scale-step", type=float, default=0.02, help="Template scale step")
+    parser.add_argument("--min-scale", type=float, default=0.50, help="Minimum template scale")
+    parser.add_argument("--max-scale", type=float, default=1.50, help="Maximum template scale")
+    parser.add_argument("--scale-step", type=float, default=0.10, help="Template scale step")
     parser.add_argument("--rotations", default="0,90,180,270", help="Comma-separated base rotations")
     parser.add_argument("--fine-rotation-range", type=float, default=0.0, help="Optional +/- rotation offsets around base rotations")
     parser.add_argument("--fine-rotation-step", type=float, default=5.0, help="Fine rotation step in degrees")
-    parser.add_argument("--stride", type=int, default=2, help="Sliding-window stride in pixels")
+    parser.add_argument("--stride", type=int, default=4, help="Sliding-window stride in pixels")
     parser.add_argument("--top-k", type=int, default=800, help="Top candidates to keep per scale/rotation")
     parser.add_argument("--nms-iou", "--nms-iou-threshold", dest="nms_iou", type=float, default=0.30, help="NMS IoU threshold")
     parser.add_argument("--max-processing-dim", type=int, default=2500, help="Resize drawing if max side exceeds this")
@@ -42,6 +44,38 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.method == "raw_sliding_window":
+        config = RawSlidingWindowConfig(
+            threshold=args.threshold,
+            min_scale=args.min_scale,
+            max_scale=args.max_scale,
+            scale_step=args.scale_step,
+            stride=args.stride,
+            top_k=args.top_k,
+            nms_iou_threshold=args.nms_iou,
+            max_detections=args.max_detections,
+            pattern_padding=args.pattern_padding,
+            enable_debug=args.enable_debug,
+            debug_dir=args.debug_dir,
+        )
+        from src.preprocessing import load_image
+
+        start = time.perf_counter()
+        detections, visualization, summary = detect_raw_sliding_window(
+            load_image(args.pattern),
+            load_image(args.drawing),
+            config,
+        )
+        elapsed = time.perf_counter() - start
+        result = [det.to_json() for det in detections]
+        save_visualization(visualization, args.output)
+        save_json(result, args.json)
+        print(f"Found {len(result)} detections in {elapsed:.2f}s")
+        print(f"Debug counts: {summary}")
+        print(f"Visualization: {args.output}")
+        print(f"JSON: {args.json}")
+        return
+
     config = DetectorConfig(
         threshold=args.threshold,
         min_scale=args.min_scale,
