@@ -9,6 +9,7 @@ import gradio as gr
 import numpy as np
 
 from src.detector import DetectorConfig, PatternDetector
+from src.skeleton_sliding_window import SkeletonSlidingWindowConfig, detect_skeleton_sliding_window
 
 
 def _rgb_to_bgr(image: np.ndarray | None) -> np.ndarray:
@@ -22,6 +23,7 @@ def _rgb_to_bgr(image: np.ndarray | None) -> np.ndarray:
 def run_detection(
     pattern_image: np.ndarray | None,
     drawing_image: np.ndarray | None,
+    method: str,
     threshold: float,
     min_scale: float,
     max_scale: float,
@@ -46,6 +48,27 @@ def run_detection(
     start = time.perf_counter()
     pattern_bgr = _rgb_to_bgr(pattern_image)
     drawing_bgr = _rgb_to_bgr(drawing_image)
+
+    if method == "skeleton_sliding_window":
+        config = SkeletonSlidingWindowConfig(
+            threshold=threshold,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            scale_step=scale_step,
+            stride=int(stride),
+            top_k=int(top_k),
+            nms_iou_threshold=nms_iou,
+            chamfer_sigma=chamfer_sigma,
+            enable_debug=enable_debug,
+        )
+        detections, visualization_bgr, summary = detect_skeleton_sliding_window(pattern_bgr, drawing_bgr, config)
+        elapsed = time.perf_counter() - start
+        result: dict[str, Any] = {
+            "detections": [det.to_json() for det in detections],
+            "debug_counts": summary,
+        }
+        visualization_rgb = visualization_bgr[:, :, ::-1]
+        return visualization_rgb, json.dumps(result, indent=2), f"{elapsed:.2f} seconds"
 
     config = DetectorConfig(
         threshold=threshold,
@@ -105,6 +128,12 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
         pattern_input = gr.Image(label="Pattern image", type="numpy")
         drawing_input = gr.Image(label="Drawing image", type="numpy")
 
+    method = gr.Dropdown(
+        choices=["existing", "skeleton_sliding_window"],
+        value="existing",
+        label="Method",
+    )
+
     with gr.Row():
         threshold = gr.Slider(0.1, 0.95, value=0.35, step=0.01, label="Confidence threshold")
         nms_iou = gr.Slider(0.05, 0.9, value=0.30, step=0.01, label="NMS IoU threshold")
@@ -151,6 +180,7 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
         inputs=[
             pattern_input,
             drawing_input,
+            method,
             threshold,
             min_scale,
             max_scale,

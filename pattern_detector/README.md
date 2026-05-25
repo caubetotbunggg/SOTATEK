@@ -127,6 +127,22 @@ GRADIO_SERVER_PORT=8960 python app.py
 
 Coordinates are `x, y, w, h` in the original drawing image coordinate system.
 
+## Experimental Skeleton Sliding Window
+
+This branch adds `--method skeleton_sliding_window` for direct skeleton template matching. It scans scaled skeleton templates over the drawing skeleton and scores patches with dilated skeleton IoU, symmetric Chamfer similarity, and XOR similarity.
+
+```bash
+python run.py \
+  --method skeleton_sliding_window \
+  --pattern examples/synthetic_pattern.png \
+  --drawing examples/synthetic_drawing.png \
+  --min-scale 0.5 \
+  --max-scale 1.5 \
+  --scale-step 0.1 \
+  --stride 4 \
+  --threshold 0.35
+```
+
 ## Project Structure
 
 ```text
