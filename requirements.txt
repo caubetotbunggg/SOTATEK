@@ -4,4 +4,6 @@ numpy>=1.21.0,<2.0.0
 scipy>=1.7.0,<2.0.0
 scikit-image>=0.18.0,<1.0.0
 gradio>=4.44.0,<5.0.0
+# Gradio 4.x imports `HfFolder` from huggingface_hub, which was removed in v1.x.
+huggingface_hub<1.0.0
 audioop-lts>=0.2.1; python_version >= "3.13"
