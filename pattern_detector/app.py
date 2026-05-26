@@ -156,10 +156,14 @@ def run_detection(
 
 def launch_demo() -> None:
     """Launch the Gradio web interface.
-    
-    Tries to use configured port from GRADIO_SERVER_PORT env var,
-    otherwise searches for available port starting from 7960.
+
+    On Hugging Face Spaces (SPACE_ID set), uses default Gradio launch settings.
+    Locally, honors GRADIO_SERVER_PORT or scans for a free port from 7960.
     """
+    if os.getenv("SPACE_ID"):
+        demo.launch()
+        return
+
     configured_port = os.getenv("GRADIO_SERVER_PORT")
     if configured_port:
         demo.launch(server_port=int(configured_port))
@@ -177,12 +181,36 @@ def launch_demo() -> None:
         raise first_error
 
 
-with gr.Blocks(title="ZET Template Matching Detector") as demo:
-    gr.Markdown("# ZET Template Matching Detector")
-    gr.Markdown("""
-    A zero-shot pattern detection tool for technical drawings.
-    Upload a pattern (template) and a drawing, adjust parameters, and click **Detect**.
-    """)
+def _gradio_example_rows() -> list[list]:
+    """Build gr.Examples rows: pattern, drawing, then all slider/checkbox inputs."""
+    rows: list[list] = []
+    for ex in EXAMPLES:
+        rows.append(
+            [
+                ex["pattern"],
+                ex["drawing"],
+                0.4,
+                ex["min_scale"],
+                ex["max_scale"],
+                0.01,
+                10,
+                0.07,
+                True,
+                False,
+            ]
+        )
+    return rows
+
+
+with gr.Blocks(title="SOTATEK — ZET Pattern Detector") as demo:
+    gr.Markdown("# SOTATEK — ZET Template Matching Detector")
+    gr.Markdown(
+        """
+    Zero-shot pattern detection for technical drawings.
+    Upload a **pattern** (template) and a **drawing**, or pick a quick example below, then click **Detect**.
+    Results show bounding boxes on the drawing and JSON metadata.
+    """
+    )
 
     # ====================================================================
     # Input Section
@@ -222,39 +250,58 @@ with gr.Blocks(title="ZET Template Matching Detector") as demo:
             output_json = gr.Code(label="JSON output", language="json")
             runtime = gr.Textbox(label="Runtime")
 
+    detection_inputs = [
+        pattern_input,
+        drawing_input,
+        wide_thr,
+        min_scale,
+        max_scale,
+        scale_step,
+        top_k,
+        nms_iou,
+        use_smart_cliff,
+        enable_debug,
+    ]
+
     run_button.click(
         fn=run_detection,
-        inputs=[
-            pattern_input,
-            drawing_input,
-            wide_thr,
-            min_scale,
-            max_scale,
-            scale_step,
-            top_k,
-            nms_iou,
-            use_smart_cliff,
-            enable_debug,
-        ],
+        inputs=detection_inputs,
         outputs=[output_image, output_json, runtime],
     )
-    
+
     # ====================================================================
-    # Preset Examples Section
+    # Quick examples (reviewer-friendly one-click tests)
     # ====================================================================
     if EXAMPLES:
-        gr.Markdown("## Preset Examples")
-        gr.Markdown("Load pre-configured examples with optimal scale ranges.")
+        gr.Markdown("## Quick test examples")
+        gr.Markdown(
+            "Three presets with tuned scale ranges. Select an example to load images "
+            "and parameters, then run detection."
+        )
+        gr.Examples(
+            examples=_gradio_example_rows(),
+            inputs=detection_inputs,
+            outputs=[output_image, output_json, runtime],
+            fn=run_detection,
+            cache_examples=False,
+            label="Examples",
+            examples_per_page=3,
+        )
+
+        gr.Markdown("### Load example images only (without running)")
         with gr.Row():
             for example in EXAMPLES:
                 with gr.Column():
-                    gr.Markdown(f"### {example['name']}")
-                    gr.Markdown(f"Scale: {example['min_scale']:.3f} - {example['max_scale']:.3f}")
+                    gr.Markdown(f"**{example['name']}**")
+                    gr.Markdown(
+                        f"Scale: {example['min_scale']:.3f} – {example['max_scale']:.3f}"
+                    )
                     example_button = gr.Button(f"Load {example['name']}")
-                    
+
                     def make_load_example(ex):
                         def load_example():
                             from PIL import Image
+
                             pattern = np.array(Image.open(ex["pattern"]))
                             drawing = np.array(Image.open(ex["drawing"]))
                             return [
@@ -263,8 +310,9 @@ with gr.Blocks(title="ZET Template Matching Detector") as demo:
                                 ex.get("min_scale", 0.08),
                                 ex.get("max_scale", 0.14),
                             ]
+
                         return load_example
-                    
+
                     example_button.click(
                         fn=make_load_example(example),
                         outputs=[pattern_input, drawing_input, min_scale, max_scale],
