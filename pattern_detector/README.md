@@ -105,6 +105,33 @@ If the default port range is busy:
 GRADIO_SERVER_PORT=8960 python app.py
 ```
 
+## Experimental ZET Template Matching Baseline
+
+This branch focuses on the Template Matching approach inspired by
+`zet-rutherford/technical-drawings-detection` for comparison against the
+advanced SOTATEK detector.
+
+`zet_tm` uses raw template matching with scale sweep, foreground-aware scoring,
+local maxima extraction, NMS, and smart-cliff score trimming.
+
+This baseline does not use SOTATEK's skeletonization, Chamfer validation,
+Edge F1 scoring, core/connector validation, or local refinement. It is
+intended as a simple experimental reference method.
+
+Template Matching example:
+
+```bash
+python run.py \
+  --pattern examples/example_pattern.png \
+  --drawing examples/example_drawing.png \
+  --output outputs/zet_tm_result.png \
+  --json outputs/zet_tm_result.json \
+  --wide-thr 0.25 \
+  --baseline-min-scale 0.05 \
+  --baseline-max-scale 0.85 \
+  --top-k 15
+```
+
 ## JSON Output
 
 ```json
