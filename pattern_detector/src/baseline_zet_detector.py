@@ -127,8 +127,28 @@ def run_tm_baseline(
     use_smart_cliff: bool = True,
     enable_debug: bool = False,
     debug_dir: str = "outputs/debug",
+    rotation_angles: list[float] | None = None,
 ) -> list[dict[str, float | int | str]]:
-    """Run foreground-aware raw Template Matching over a scale window."""
+    """Run foreground-aware raw Template Matching over a scale and rotation window.
+    
+    Args:
+        drawing_bgr: Input drawing/scene image in BGR
+        pattern_bgr: Template/pattern image in BGR
+        wide_thr: Local maxima threshold
+        nms_iou: Non-maximum suppression IOU threshold
+        top_k: Keep top K detections
+        min_scale: Minimum scale factor
+        max_scale: Maximum scale factor
+        scan_scales: Number of scale steps
+        scale_step: Fixed scale step (if None, uses linspace)
+        use_smart_cliff: Apply smart cliff filtering
+        enable_debug: Save debug outputs
+        debug_dir: Debug output directory
+        rotation_angles: List of rotation angles in degrees (default: [0, 45, 90, 135])
+    """
+    if rotation_angles is None:
+        rotation_angles = [0.0, 45.0, 90.0, 135.0]
+    
     base_gray = enhance(to_gray(drawing_bgr))
     ref_gray = enhance(to_gray(pattern_bgr))
     best_scale, _, _, _ = find_best_scale_tm(base_gray, ref_gray, min_scale=min_scale, max_scale=max_scale)
@@ -139,44 +159,49 @@ def run_tm_baseline(
     scores: list[float] = []
     details: list[dict[str, float | int | str]] = []
 
-    for scale in _scan_scale_values(low, high, scan_scales, scale_step):
-        ref_scaled = _resize_ref(ref_gray, float(scale))
-        if ref_scaled is None:
-            continue
-        h, w = ref_scaled.shape[:2]
-        if h > base_gray.shape[0] or w > base_gray.shape[1]:
-            continue
+    # Get rotated templates
+    rotated_templates = _get_rotated_templates(ref_gray, rotation_angles)
 
-        foreground_mask = cv2.dilate(_foreground_mask(ref_scaled), np.ones((3, 3), np.uint8), iterations=1)
-        score_map = _masked_ncc_map(base_gray, ref_scaled, foreground_mask)
-
-        for x, y, ncc_score in _local_maxima_candidates(score_map, w, h, wide_thr):
-            patch = base_gray[y : y + h, x : x + w]
-            if patch.shape != ref_scaled.shape:
+    # Process each rotation
+    for ref_scaled_orig, rotation in rotated_templates:
+        for scale in _scan_scale_values(low, high, scan_scales, scale_step):
+            ref_scaled = _resize_ref(ref_scaled_orig, float(scale))
+            if ref_scaled is None:
+                continue
+            h, w = ref_scaled.shape[:2]
+            if h > base_gray.shape[0] or w > base_gray.shape[1]:
                 continue
 
-            foreground_iou = _foreground_iou(ref_scaled, patch, foreground_mask)
-            diff_similarity = _masked_diff_similarity(ref_scaled, patch, foreground_mask)
-            ncc_score = float(np.clip(max(0.0, ncc_score), 0.0, 1.0))
-            confidence = 0.50 * ncc_score + 0.30 * foreground_iou + 0.20 * diff_similarity
+            foreground_mask = cv2.dilate(_foreground_mask(ref_scaled), np.ones((3, 3), np.uint8), iterations=1)
+            score_map = _masked_ncc_map(base_gray, ref_scaled, foreground_mask)
 
-            boxes.append((int(x), int(y), int(w), int(h)))
-            scores.append(float(confidence))
-            details.append(
-                {
-                    "x": int(x),
-                    "y": int(y),
-                    "w": int(w),
-                    "h": int(h),
-                    "confidence": float(confidence),
-                    "scale": float(scale),
-                    "rotation": 0.0,
-                    "method": "zet_tm",
-                    "tm_score": ncc_score,
-                    "foreground_iou": foreground_iou,
-                    "diff_similarity": diff_similarity,
-                }
-            )
+            for x, y, ncc_score in _local_maxima_candidates(score_map, w, h, wide_thr):
+                patch = base_gray[y : y + h, x : x + w]
+                if patch.shape != ref_scaled.shape:
+                    continue
+
+                foreground_iou = _foreground_iou(ref_scaled, patch, foreground_mask)
+                diff_similarity = _masked_diff_similarity(ref_scaled, patch, foreground_mask)
+                ncc_score = float(np.clip(max(0.0, ncc_score), 0.0, 1.0))
+                confidence = 0.50 * ncc_score + 0.30 * foreground_iou + 0.20 * diff_similarity
+
+                boxes.append((int(x), int(y), int(w), int(h)))
+                scores.append(float(confidence))
+                details.append(
+                    {
+                        "x": int(x),
+                        "y": int(y),
+                        "w": int(w),
+                        "h": int(h),
+                        "confidence": float(confidence),
+                        "scale": float(scale),
+                        "rotation": float(rotation),
+                        "method": "zet_tm",
+                        "tm_score": ncc_score,
+                        "foreground_iou": foreground_iou,
+                        "diff_similarity": diff_similarity,
+                    }
+                )
 
     detections = _finish_detections(details, boxes, scores, nms_iou, top_k, use_smart_cliff)
     if enable_debug:
@@ -188,6 +213,7 @@ def run_tm_baseline(
             wide_thr=wide_thr,
             top_k=top_k,
             nms_iou=nms_iou,
+            rotation_angles=rotation_angles,
         )
     return detections
 
@@ -205,6 +231,50 @@ def draw_baseline_detections(drawing_bgr: np.ndarray, detections: list[dict[str,
         cv2.rectangle(vis, (x, label_y), (x + tw + 6, label_y + th + baseline + 4), color, -1)
         cv2.putText(vis, label, (x + 3, label_y + th + 1), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 0, 0), 1)
     return vis
+
+
+def _rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
+    """Rotate image by given angle (in degrees) around center."""
+    h, w = image.shape[:2]
+    center = (w / 2, h / 2)
+    rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    
+    # Calculate new bounding dimensions
+    cos_angle = np.abs(rotation_matrix[0, 0])
+    sin_angle = np.abs(rotation_matrix[0, 1])
+    new_w = int(h * sin_angle + w * cos_angle)
+    new_h = int(h * cos_angle + w * sin_angle)
+    
+    # Adjust rotation matrix for new dimensions
+    rotation_matrix[0, 2] += (new_w / 2) - center[0]
+    rotation_matrix[1, 2] += (new_h / 2) - center[1]
+    
+    rotated = cv2.warpAffine(
+        image,
+        rotation_matrix,
+        (new_w, new_h),
+        borderMode=cv2.BORDER_REPLICATE,
+        flags=cv2.INTER_LINEAR
+    )
+    return rotated
+
+
+def _get_rotated_templates(ref_gray: np.ndarray, angles: list[float] | None = None) -> list[tuple[np.ndarray, float]]:
+    """Generate rotated versions of template at specified angles.
+    
+    Returns list of (rotated_template, angle) tuples.
+    """
+    if angles is None:
+        angles = [0.0, 45.0, 90.0, 135.0]
+    
+    templates = []
+    for angle in angles:
+        if angle == 0.0:
+            templates.append((ref_gray.copy(), 0.0))
+        else:
+            rotated = _rotate_image(ref_gray, angle)
+            templates.append((rotated, angle))
+    return templates
 
 
 def _resize_ref(ref_gray: np.ndarray, scale: float) -> np.ndarray | None:
@@ -314,6 +384,7 @@ def _save_tm_debug(
     wide_thr: float,
     top_k: int,
     nms_iou: float,
+    rotation_angles: list[float] | None = None,
 ) -> None:
     debug_path = Path(debug_dir)
     debug_path.mkdir(parents=True, exist_ok=True)
@@ -329,6 +400,7 @@ def _save_tm_debug(
         "wide_thr": float(wide_thr),
         "top_k": int(top_k),
         "nms_iou": float(nms_iou),
+        "rotation_angles": rotation_angles or [0.0],
     }
     with (debug_path / "zet_tm_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
