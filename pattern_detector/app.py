@@ -3,11 +3,57 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 import gradio as gr
 import numpy as np
 
 from src.baseline_zet_detector import draw_baseline_detections, run_tm_baseline
+
+
+# Load example images
+EXAMPLES_DIR = Path(__file__).parent / "examples"
+PATTERN_DIR = EXAMPLES_DIR / "pattern"
+DRAWING_DIR = EXAMPLES_DIR / "drawing"
+
+# Available examples with specific scale ranges
+EXAMPLES = []
+if DRAWING_DIR.exists() and PATTERN_DIR.exists():
+    drawing_path = DRAWING_DIR / "example1.png"
+    
+    # Define 3 examples using the same drawing with different scale ranges
+    example_configs = [
+        {
+            "name": "Example 1",
+            "pattern_name": "example1_pattern.png",
+            "min_scale": 0.08,
+            "max_scale": 0.09,
+        },
+        {
+            "name": "Example 2",
+            "pattern_name": "example2_pattern.png",
+            "min_scale": 0.10,
+            "max_scale": 0.14,
+        },
+        {
+            "name": "Example 3",
+            "pattern_name": "example3_pattern.png",
+            "min_scale": 0.04,
+            "max_scale": 1.0,
+        },
+    ]
+    
+    if drawing_path.exists():
+        for config in example_configs:
+            pattern_path = PATTERN_DIR / config["pattern_name"]
+            if pattern_path.exists():
+                EXAMPLES.append({
+                    "name": config["name"],
+                    "drawing": str(drawing_path),
+                    "pattern": str(pattern_path),
+                    "min_scale": config["min_scale"],
+                    "max_scale": config["max_scale"],
+                })
 
 
 def _rgb_to_bgr(image: np.ndarray | None) -> np.ndarray:
@@ -83,14 +129,14 @@ with gr.Blocks(title="ZET Template Matching Detector") as demo:
         drawing_input = gr.Image(label="Drawing image", type="numpy")
 
     with gr.Row():
-        wide_thr = gr.Slider(0.0, 1.0, value=0.25, step=0.01, label="Candidate threshold")
-        nms_iou = gr.Slider(0.05, 0.9, value=0.35, step=0.01, label="NMS IoU")
-        top_k = gr.Slider(1, 100, value=15, step=1, label="Top K")
+        wide_thr = gr.Slider(0.0, 1.0, value=0.4, step=0.01, label="Candidate threshold")
+        nms_iou = gr.Slider(0.05, 0.9, value=0.07, step=0.01, label="NMS IoU")
+        top_k = gr.Slider(1, 100, value=10, step=1, label="Top K")
 
     with gr.Row():
-        min_scale = gr.Slider(0.01, 1.5, value=0.05, step=0.01, label="Min scale")
-        max_scale = gr.Slider(0.05, 2.0, value=0.85, step=0.01, label="Max scale")
-        scale_step = gr.Slider(0.001, 0.20, value=0.02, step=0.001, label="Scale step")
+        min_scale = gr.Slider(0.01, 1.5, value=0.08, step=0.01, label="Min scale")
+        max_scale = gr.Slider(0.05, 2.0, value=0.14, step=0.01, label="Max scale")
+        scale_step = gr.Slider(0.001, 0.20, value=0.01, step=0.001, label="Scale step")
 
     with gr.Row():
         use_smart_cliff = gr.Checkbox(value=True, label="Use smart cliff")
@@ -120,6 +166,33 @@ with gr.Blocks(title="ZET Template Matching Detector") as demo:
         ],
         outputs=[output_image, output_json, runtime],
     )
+    
+    # Add preset examples
+    if EXAMPLES:
+        gr.Markdown("## Preset Examples")
+        with gr.Row():
+            for example in EXAMPLES:
+                with gr.Column():
+                    gr.Markdown(f"### {example['name']}")
+                    example_button = gr.Button(f"Load {example['name']}")
+                    
+                    def make_load_example(ex):
+                        def load_example():
+                            from PIL import Image
+                            pattern = np.array(Image.open(ex["pattern"]))
+                            drawing = np.array(Image.open(ex["drawing"]))
+                            return [
+                                pattern,
+                                drawing,
+                                ex.get("min_scale", 0.08),
+                                ex.get("max_scale", 0.14),
+                            ]
+                        return load_example
+                    
+                    example_button.click(
+                        fn=make_load_example(example),
+                        outputs=[pattern_input, drawing_input, min_scale, max_scale],
+                    )
 
 
 if __name__ == "__main__":
