@@ -105,6 +105,50 @@ If the default port range is busy:
 GRADIO_SERVER_PORT=8960 python app.py
 ```
 
+## Experimental Baselines from technical-drawings-detection
+
+This branch includes two isolated classical CV baselines inspired by
+`zet-rutherford/technical-drawings-detection` for comparison against the
+advanced SOTATEK detector:
+
+- `zet_tm`: raw template matching with scale sweep, local maxima extraction, NMS, and smart-cliff score trimming.
+- `zet_hog`: HOG sliding-window matching with scale sweep, NMS, and smart-cliff score trimming.
+
+These baselines do not use SOTATEK's skeletonization, Chamfer validation,
+Edge F1 scoring, core/connector validation, or local refinement. They are
+intended as simple experimental reference methods.
+
+Template Matching example:
+
+```bash
+python run.py \
+  --method zet_tm \
+  --pattern examples/example_pattern.png \
+  --drawing examples/example_drawing.png \
+  --output outputs/zet_tm_result.png \
+  --json outputs/zet_tm_result.json \
+  --wide-thr 0.25 \
+  --baseline-min-scale 0.05 \
+  --baseline-max-scale 0.85 \
+  --top-k 15
+```
+
+HOG Sliding Window example:
+
+```bash
+python run.py \
+  --method zet_hog \
+  --pattern examples/example_pattern.png \
+  --drawing examples/example_drawing.png \
+  --output outputs/zet_hog_result.png \
+  --json outputs/zet_hog_result.json \
+  --wide-thr 0.50 \
+  --stride-ratio 0.25 \
+  --baseline-min-scale 0.05 \
+  --baseline-max-scale 0.85 \
+  --top-k 30
+```
+
 ## JSON Output
 
 ```json

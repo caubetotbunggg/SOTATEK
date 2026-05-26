@@ -8,6 +8,7 @@ from typing import Any
 import gradio as gr
 import numpy as np
 
+from src.baseline_zet_detector import draw_baseline_detections, run_hog_baseline, run_tm_baseline
 from src.detector import DetectorConfig, PatternDetector
 
 
@@ -22,6 +23,7 @@ def _rgb_to_bgr(image: np.ndarray | None) -> np.ndarray:
 def run_detection(
     pattern_image: np.ndarray | None,
     drawing_image: np.ndarray | None,
+    method: str,
     threshold: float,
     min_scale: float,
     max_scale: float,
@@ -41,11 +43,54 @@ def run_detection(
     validation_dilation_iterations: int,
     local_refinement_radius: int,
     validation_padding: int,
+    wide_thr: float,
+    stride_ratio: float,
+    baseline_min_scale: float,
+    baseline_max_scale: float,
+    baseline_scan_scales: int,
+    use_smart_cliff: bool,
     enable_debug: bool,
 ) -> tuple[np.ndarray | None, str, str]:
     start = time.perf_counter()
     pattern_bgr = _rgb_to_bgr(pattern_image)
     drawing_bgr = _rgb_to_bgr(drawing_image)
+
+    if method == "zet_tm":
+        detections = run_tm_baseline(
+            drawing_bgr,
+            pattern_bgr,
+            wide_thr=wide_thr,
+            nms_iou=nms_iou,
+            top_k=int(top_k),
+            min_scale=baseline_min_scale,
+            max_scale=baseline_max_scale,
+            scan_scales=int(baseline_scan_scales),
+            use_smart_cliff=use_smart_cliff,
+            enable_debug=enable_debug,
+        )
+        elapsed = time.perf_counter() - start
+        visualization_rgb = draw_baseline_detections(drawing_bgr, detections)[:, :, ::-1]
+        result: dict[str, Any] = {"method": method, "detections": detections}
+        return visualization_rgb, json.dumps(result, indent=2), f"{elapsed:.2f} seconds"
+
+    if method == "zet_hog":
+        detections = run_hog_baseline(
+            drawing_bgr,
+            pattern_bgr,
+            wide_thr=wide_thr,
+            nms_iou=nms_iou,
+            top_k=int(top_k),
+            stride_ratio=stride_ratio,
+            min_scale=baseline_min_scale,
+            max_scale=baseline_max_scale,
+            n_scales=int(baseline_scan_scales),
+            use_smart_cliff=use_smart_cliff,
+            enable_debug=enable_debug,
+        )
+        elapsed = time.perf_counter() - start
+        visualization_rgb = draw_baseline_detections(drawing_bgr, detections)[:, :, ::-1]
+        result = {"method": method, "detections": detections}
+        return visualization_rgb, json.dumps(result, indent=2), f"{elapsed:.2f} seconds"
 
     config = DetectorConfig(
         threshold=threshold,
@@ -105,6 +150,12 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
         pattern_input = gr.Image(label="Pattern image", type="numpy")
         drawing_input = gr.Image(label="Drawing image", type="numpy")
 
+    method = gr.Dropdown(
+        choices=["advanced", "zet_tm", "zet_hog"],
+        value="advanced",
+        label="Detection method",
+    )
+
     with gr.Row():
         threshold = gr.Slider(0.1, 0.95, value=0.35, step=0.01, label="Confidence threshold")
         nms_iou = gr.Slider(0.05, 0.9, value=0.30, step=0.01, label="NMS IoU threshold")
@@ -138,6 +189,16 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
             local_refinement_radius = gr.Slider(0, 8, value=4, step=1, label="Local refinement radius")
             validation_padding = gr.Slider(0, 8, value=3, step=1, label="Validation padding")
 
+    with gr.Accordion("Experimental baseline settings", open=False):
+        with gr.Row():
+            wide_thr = gr.Slider(0.0, 1.0, value=0.25, step=0.01, label="Wide threshold")
+            stride_ratio = gr.Slider(0.05, 1.0, value=0.25, step=0.05, label="HOG stride ratio")
+        with gr.Row():
+            baseline_min_scale = gr.Slider(0.01, 1.5, value=0.05, step=0.01, label="Baseline min scale")
+            baseline_max_scale = gr.Slider(0.05, 2.0, value=0.85, step=0.01, label="Baseline max scale")
+            baseline_scan_scales = gr.Slider(1, 80, value=30, step=1, label="Baseline scan scales")
+        use_smart_cliff = gr.Checkbox(value=True, label="Use smart cliff")
+
     run_button = gr.Button("Detect", variant="primary")
 
     with gr.Row():
@@ -151,6 +212,7 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
         inputs=[
             pattern_input,
             drawing_input,
+            method,
             threshold,
             min_scale,
             max_scale,
@@ -170,6 +232,12 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
             validation_dilation_iterations,
             local_refinement_radius,
             validation_padding,
+            wide_thr,
+            stride_ratio,
+            baseline_min_scale,
+            baseline_max_scale,
+            baseline_scan_scales,
+            use_smart_cliff,
             enable_debug,
         ],
         outputs=[output_image, output_json, runtime],
