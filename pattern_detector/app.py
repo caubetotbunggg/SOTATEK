@@ -161,7 +161,10 @@ def launch_demo() -> None:
     Locally, honors GRADIO_SERVER_PORT or scans for a free port from 7960.
     """
     if os.getenv("SPACE_ID"):
-        demo.launch()
+        # HF Spaces bind to a container port and proxy requests externally.
+        # Explicitly bind to 0.0.0.0 and disable `share` to avoid the "localhost not accessible" error.
+        port = int(os.getenv("PORT", "7860"))
+        demo.launch(server_name="0.0.0.0", server_port=port, share=False)
         return
 
     configured_port = os.getenv("GRADIO_SERVER_PORT")
