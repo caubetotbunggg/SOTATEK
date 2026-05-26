@@ -1,3 +1,18 @@
+"""Gradio web interface for ZET Template Matching Detector.
+
+Provides an interactive UI for:
+- Uploading pattern and drawing images
+- Adjusting detection parameters via sliders
+- Loading preset examples with optimal scale ranges
+- Visualizing detections in real-time
+- Exporting results as JSON
+
+Usage:
+    python app.py
+
+Then open the URL printed in console (typically http://localhost:7860)
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,17 +26,22 @@ import numpy as np
 from src.baseline_zet_detector import draw_baseline_detections, run_tm_baseline
 
 
+# ============================================================================
+# Configuration
+# ============================================================================
+
 # Load example images
 EXAMPLES_DIR = Path(__file__).parent / "examples"
 PATTERN_DIR = EXAMPLES_DIR / "pattern"
 DRAWING_DIR = EXAMPLES_DIR / "drawing"
 
-# Available examples with specific scale ranges
+# Available examples with specific scale ranges for optimal detection
 EXAMPLES = []
 if DRAWING_DIR.exists() and PATTERN_DIR.exists():
     drawing_path = DRAWING_DIR / "example1.png"
     
-    # Define 3 examples using the same drawing with different scale ranges
+    # Define 3 preset examples using the same drawing with different patterns
+    # Each has optimized scale ranges for its specific pattern size
     example_configs = [
         {
             "name": "Example 1",
@@ -57,6 +77,17 @@ if DRAWING_DIR.exists() and PATTERN_DIR.exists():
 
 
 def _rgb_to_bgr(image: np.ndarray | None) -> np.ndarray:
+    """Convert RGB image to BGR or handle grayscale images.
+    
+    Args:
+        image: Input image (RGB or grayscale)
+    
+    Returns:
+        BGR image suitable for processing by detector
+    
+    Raises:
+        gr.Error: If image is None
+    """
     if image is None:
         raise gr.Error("Please upload both a pattern image and a drawing image.")
     if image.ndim == 2:
@@ -76,6 +107,26 @@ def run_detection(
     use_smart_cliff: bool,
     enable_debug: bool,
 ) -> tuple[np.ndarray | None, str, str]:
+    """Execute template matching detection with given parameters.
+    
+    Args:
+        pattern_image: Pattern/template to find (RGB numpy array)
+        drawing_image: Drawing/scene to search in (RGB numpy array)
+        wide_thr: Local maxima threshold for candidate extraction (0-1)
+        min_scale: Minimum scale factor to test
+        max_scale: Maximum scale factor to test
+        scale_step: Granularity of scale search
+        top_k: Maximum number of detections to return
+        nms_iou: Non-maximum suppression IoU threshold
+        use_smart_cliff: Auto-trim low-confidence tail
+        enable_debug: Save intermediate debug images
+    
+    Returns:
+        Tuple of:
+        - Visualization image (RGB numpy array with bounding boxes)
+        - JSON string with detection details
+        - Runtime in seconds
+    """
     start = time.perf_counter()
     pattern_bgr = _rgb_to_bgr(pattern_image)
     drawing_bgr = _rgb_to_bgr(drawing_image)
@@ -104,6 +155,11 @@ def run_detection(
 
 
 def launch_demo() -> None:
+    """Launch the Gradio web interface.
+    
+    Tries to use configured port from GRADIO_SERVER_PORT env var,
+    otherwise searches for available port starting from 7960.
+    """
     configured_port = os.getenv("GRADIO_SERVER_PORT")
     if configured_port:
         demo.launch(server_port=int(configured_port))
@@ -123,11 +179,21 @@ def launch_demo() -> None:
 
 with gr.Blocks(title="ZET Template Matching Detector") as demo:
     gr.Markdown("# ZET Template Matching Detector")
+    gr.Markdown("""
+    A zero-shot pattern detection tool for technical drawings.
+    Upload a pattern (template) and a drawing, adjust parameters, and click **Detect**.
+    """)
 
+    # ====================================================================
+    # Input Section
+    # ====================================================================
     with gr.Row():
         pattern_input = gr.Image(label="Pattern image", type="numpy")
         drawing_input = gr.Image(label="Drawing image", type="numpy")
 
+    # ====================================================================
+    # Parameter Section
+    # ====================================================================
     with gr.Row():
         wide_thr = gr.Slider(0.0, 1.0, value=0.4, step=0.01, label="Candidate threshold")
         nms_iou = gr.Slider(0.05, 0.9, value=0.07, step=0.01, label="NMS IoU")
@@ -142,8 +208,14 @@ with gr.Blocks(title="ZET Template Matching Detector") as demo:
         use_smart_cliff = gr.Checkbox(value=True, label="Use smart cliff")
         enable_debug = gr.Checkbox(value=False, label="Save debug output")
 
+    # ====================================================================
+    # Action Button
+    # ====================================================================
     run_button = gr.Button("Detect", variant="primary")
 
+    # ====================================================================
+    # Output Section
+    # ====================================================================
     with gr.Row():
         output_image = gr.Image(label="Detections", type="numpy")
         with gr.Column():
@@ -167,13 +239,17 @@ with gr.Blocks(title="ZET Template Matching Detector") as demo:
         outputs=[output_image, output_json, runtime],
     )
     
-    # Add preset examples
+    # ====================================================================
+    # Preset Examples Section
+    # ====================================================================
     if EXAMPLES:
         gr.Markdown("## Preset Examples")
+        gr.Markdown("Load pre-configured examples with optimal scale ranges.")
         with gr.Row():
             for example in EXAMPLES:
                 with gr.Column():
                     gr.Markdown(f"### {example['name']}")
+                    gr.Markdown(f"Scale: {example['min_scale']:.3f} - {example['max_scale']:.3f}")
                     example_button = gr.Button(f"Load {example['name']}")
                     
                     def make_load_example(ex):

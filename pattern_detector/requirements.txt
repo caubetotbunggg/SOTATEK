@@ -1,6 +1,17 @@
-opencv-python
-numpy
-scipy
-scikit-image
-gradio
-pillow
+# Core dependencies for ZET Template Matching Detector
+
+# Computer Vision
+opencv-python>=4.5.0,<5.0.0
+pillow>=8.0.0,<11.0.0
+
+# Numerical Computing
+numpy>=1.21.0,<2.0.0
+scipy>=1.7.0,<2.0.0
+scikit-image>=0.18.0,<1.0.0
+
+# Web Interface
+gradio>=4.0.0,<5.0.0
+
+# Optional but recommended
+# python-dotenv>=0.19.0  # For environment configuration
+# matplotlib>=3.5.0      # For advanced visualization

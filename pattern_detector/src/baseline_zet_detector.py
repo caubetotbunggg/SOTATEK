@@ -1,8 +1,33 @@
-"""Template Matching baseline inspired by technical-drawings-detection.
+"""Template Matching baseline for zero-shot pattern detection.
 
-This module is intentionally isolated from the advanced SOTATEK detector.
-It keeps only the zero-shot raw Template Matching path that is working well
-for the current experiment.
+This module provides a classical computer vision approach to template matching
+in technical drawings. It uses multi-scale search, rotation invariance, and
+multi-metric confidence scoring without requiring any training data.
+
+Core Algorithm:
+    1. Convert images to grayscale and enhance with CLAHE
+    2. Generate rotated template variants (0°, 45°, 90°, 135°)
+    3. Scale templates within specified range
+    4. Compute foreground mask for template
+    5. Perform Normalized Cross-Correlation (NCC) matching
+    6. Extract local maxima as candidates
+    7. Score candidates using multiple metrics:
+       - NCC similarity (50% weight)
+       - Foreground IoU (30% weight)
+       - Pixel difference similarity (20% weight)
+    8. Apply Non-Maximum Suppression (NMS)
+    9. Filter with smart cliff trimming for low-confidence tail
+
+Features:
+    - Zero-shot: No training required
+    - Multi-scale: Detects patterns at different sizes
+    - Rotation-aware: Supports 4 rotation angles
+    - Foreground-aware: Uses binary masks for robustness
+    - Configurable: All parameters tunable for different use cases
+
+References:
+    - Inspired by: zet-rutherford/technical-drawings-detection
+    - Template Matching: https://docs.opencv.org/master/de/da9/tutorial_template_matching.html
 """
 
 from __future__ import annotations
@@ -37,6 +62,25 @@ def enhance(gray: np.ndarray) -> np.ndarray:
 
 
 def nms_xywh(boxes: list[tuple[int, int, int, int]], scores: list[float], iou_thr: float = 0.35) -> list[int]:
+    """Non-Maximum Suppression for axis-aligned bounding boxes.
+    
+    Removes overlapping bounding boxes, keeping only the highest-scoring ones.
+    
+    Args:
+        boxes: List of (x, y, w, h) tuples
+        scores: Confidence scores corresponding to boxes
+        iou_thr: IoU threshold for suppression (0-1). Boxes with IoU > threshold
+                 relative to a higher-scoring box are suppressed.
+    
+    Returns:
+        List of indices of boxes to keep (sorted by score, descending)
+    
+    Example:
+        >>> boxes = [(10, 10, 50, 50), (15, 15, 50, 50)]
+        >>> scores = [0.9, 0.7]
+        >>> keep_idx = nms_xywh(boxes, scores, iou_thr=0.3)
+        >>> # Returns [0] because boxes[1] overlaps too much with boxes[0]
+    """
     if not boxes:
         return []
 
@@ -67,7 +111,29 @@ def nms_xywh(boxes: list[tuple[int, int, int, int]], scores: list[float], iou_th
 
 
 def smart_cliff(scores: list[float], decay: float = 0.52, min_gap: float = 0.28) -> int:
-    """Return how many descending scores to keep before a sharp drop."""
+    """Find optimal cutoff point in descending score list using cliff detection.
+    
+    Automatically determines how many top scores to keep before a significant
+    drop occurs. Useful for filtering out low-confidence tail of predictions.
+    
+    Strategy: Looks for either:
+        - Exponential decay: score < prev_score * decay_factor
+        - Absolute gap: prev_score - score > min_gap
+    
+    Args:
+        scores: List of confidence scores (should be sorted descending)
+        decay: Multiplicative decay threshold (0-1). Scores falling below
+               prev_score * decay are considered a "cliff"
+        min_gap: Additive gap threshold. Absolute drops >= min_gap also trigger cutoff
+    
+    Returns:
+        Number of scores to keep (index where cliff occurs)
+    
+    Example:
+        >>> scores = [0.95, 0.90, 0.85, 0.30, 0.25, 0.20]
+        >>> cutoff = smart_cliff(scores)
+        >>> # Large gap from 0.85 to 0.30 triggers cliff, returns ~3
+    """
     if not scores:
         return 0
     if len(scores) == 1:
@@ -89,7 +155,28 @@ def find_best_scale_tm(
     min_scale: float = 0.05,
     max_scale: float = 0.85,
 ) -> tuple[float, float, int, int]:
-    """Sweep scales and return the best rough TM scale."""
+    """Find best template scale via exhaustive search.
+    
+    Sweeps through scales in the given range and returns the scale that
+    produces the highest template matching score.
+    
+    Args:
+        base_gray: Target image (grayscale)
+        ref_gray: Template image (grayscale)
+        steps: Number of scales to test
+        min_scale: Minimum scale factor
+        max_scale: Maximum scale factor
+    
+    Returns:
+        Tuple of (best_scale, best_score, best_w, best_h)
+        - best_scale: Optimal scale factor
+        - best_score: Highest NCC score achieved
+        - best_w, best_h: Dimensions of template at best scale
+    
+    Note:
+        This is used to initialize the scale search window.
+        Real matching will search around this scale.
+    """
     best_score = -1.0
     best_scale = min_scale
     best_w = 0
@@ -234,7 +321,19 @@ def draw_baseline_detections(drawing_bgr: np.ndarray, detections: list[dict[str,
 
 
 def _rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
-    """Rotate image by given angle (in degrees) around center."""
+    """Rotate image around its center by specified angle.
+    
+    Args:
+        image: Input image (grayscale or color)
+        angle: Rotation angle in degrees (counterclockwise)
+    
+    Returns:
+        Rotated image. Output size is adjusted to preserve the entire rotated image.
+    
+    Note:
+        Uses INTER_LINEAR interpolation and BORDER_REPLICATE for boundaries.
+        Output image may be larger than input to accommodate rotation.
+    """
     h, w = image.shape[:2]
     center = (w / 2, h / 2)
     rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
@@ -262,7 +361,17 @@ def _rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
 def _get_rotated_templates(ref_gray: np.ndarray, angles: list[float] | None = None) -> list[tuple[np.ndarray, float]]:
     """Generate rotated versions of template at specified angles.
     
-    Returns list of (rotated_template, angle) tuples.
+    Args:
+        ref_gray: Template image (grayscale)
+        angles: List of rotation angles in degrees (default: [0, 45, 90, 135])
+    
+    Returns:
+        List of (rotated_template, angle) tuples for each angle.
+        The 0° version is not rotated, just copied.
+    
+    Example:
+        >>> templates = _get_rotated_templates(pattern_img, angles=[0, 90])
+        >>> # Returns [(pattern_img, 0), (rotated_img, 90)]
     """
     if angles is None:
         angles = [0.0, 45.0, 90.0, 135.0]
@@ -301,6 +410,17 @@ def _scan_scale_values(
 
 
 def _foreground_mask(gray: np.ndarray) -> np.ndarray:
+    """Extract binary foreground mask using Otsu's method.
+    
+    Uses Gaussian blur + Otsu binarization, then auto-corrects polarity
+    so foreground (strokes) = 255 and background = 0.
+    
+    Args:
+        gray: Grayscale image
+    
+    Returns:
+        Binary mask (uint8): 255 for foreground, 0 for background
+    """
     blur = cv2.GaussianBlur(gray, (3, 3), 0)
     _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     if float(np.mean(otsu > 0)) > 0.5:
@@ -309,6 +429,19 @@ def _foreground_mask(gray: np.ndarray) -> np.ndarray:
 
 
 def _foreground_iou(template_gray: np.ndarray, patch_gray: np.ndarray, mask: np.ndarray | None = None) -> float:
+    """Compute Intersection-over-Union of foreground regions.
+    
+    Measures how well the foreground regions of template and patch overlap.
+    Useful for ranking candidates with similar appearance.
+    
+    Args:
+        template_gray: Template image (grayscale)
+        patch_gray: Candidate patch from image (same size as template)
+        mask: Optional mask to restrict IoU computation to certain pixels
+    
+    Returns:
+        IoU value (0.0-1.0). Higher = better overlap.
+    """
     template_fg = _foreground_mask(template_gray) > 0
     patch_fg = _foreground_mask(patch_gray) > 0
     if mask is not None and np.any(mask > 0):
