@@ -3,13 +3,11 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any
 
 import gradio as gr
 import numpy as np
 
-from src.baseline_zet_detector import draw_baseline_detections, run_hog_baseline, run_tm_baseline
-from src.detector import DetectorConfig, PatternDetector
+from src.baseline_zet_detector import draw_baseline_detections, run_tm_baseline
 
 
 def _rgb_to_bgr(image: np.ndarray | None) -> np.ndarray:
@@ -23,31 +21,12 @@ def _rgb_to_bgr(image: np.ndarray | None) -> np.ndarray:
 def run_detection(
     pattern_image: np.ndarray | None,
     drawing_image: np.ndarray | None,
-    method: str,
-    threshold: float,
+    wide_thr: float,
     min_scale: float,
     max_scale: float,
-    scale_step: float,
-    rotations: str,
-    fine_rotation_range: float,
-    fine_rotation_step: float,
-    stride: int,
+    scan_scales: int,
     top_k: int,
     nms_iou: float,
-    max_processing_dim: int,
-    chamfer_sigma: float,
-    max_chamfer_distance: float,
-    min_template_coverage: float,
-    min_patch_coverage: float,
-    max_extra_patch_ratio: float,
-    validation_dilation_iterations: int,
-    local_refinement_radius: int,
-    validation_padding: int,
-    wide_thr: float,
-    stride_ratio: float,
-    baseline_min_scale: float,
-    baseline_max_scale: float,
-    baseline_scan_scales: int,
     use_smart_cliff: bool,
     enable_debug: bool,
 ) -> tuple[np.ndarray | None, str, str]:
@@ -55,74 +34,26 @@ def run_detection(
     pattern_bgr = _rgb_to_bgr(pattern_image)
     drawing_bgr = _rgb_to_bgr(drawing_image)
 
-    if method == "zet_tm":
-        detections = run_tm_baseline(
-            drawing_bgr,
-            pattern_bgr,
-            wide_thr=wide_thr,
-            nms_iou=nms_iou,
-            top_k=int(top_k),
-            min_scale=baseline_min_scale,
-            max_scale=baseline_max_scale,
-            scan_scales=int(baseline_scan_scales),
-            use_smart_cliff=use_smart_cliff,
-            enable_debug=enable_debug,
-        )
-        elapsed = time.perf_counter() - start
-        visualization_rgb = draw_baseline_detections(drawing_bgr, detections)[:, :, ::-1]
-        result: dict[str, Any] = {"method": method, "detections": detections}
-        return visualization_rgb, json.dumps(result, indent=2), f"{elapsed:.2f} seconds"
-
-    if method == "zet_hog":
-        detections = run_hog_baseline(
-            drawing_bgr,
-            pattern_bgr,
-            wide_thr=wide_thr,
-            nms_iou=nms_iou,
-            top_k=int(top_k),
-            stride_ratio=stride_ratio,
-            min_scale=baseline_min_scale,
-            max_scale=baseline_max_scale,
-            n_scales=int(baseline_scan_scales),
-            use_smart_cliff=use_smart_cliff,
-            enable_debug=enable_debug,
-        )
-        elapsed = time.perf_counter() - start
-        visualization_rgb = draw_baseline_detections(drawing_bgr, detections)[:, :, ::-1]
-        result = {"method": method, "detections": detections}
-        return visualization_rgb, json.dumps(result, indent=2), f"{elapsed:.2f} seconds"
-
-    config = DetectorConfig(
-        threshold=threshold,
+    detections = run_tm_baseline(
+        drawing_bgr,
+        pattern_bgr,
+        wide_thr=wide_thr,
+        nms_iou=nms_iou,
+        top_k=int(top_k),
         min_scale=min_scale,
         max_scale=max_scale,
-        scale_step=scale_step,
-        rotations=rotations,
-        fine_rotation_range=fine_rotation_range,
-        fine_rotation_step=fine_rotation_step,
-        stride=int(stride),
-        top_k=int(top_k),
-        nms_iou_threshold=nms_iou,
-        max_processing_dim=int(max_processing_dim),
-        chamfer_sigma=chamfer_sigma,
-        max_chamfer_distance=max_chamfer_distance,
-        min_template_coverage=min_template_coverage,
-        min_patch_coverage=min_patch_coverage,
-        max_extra_patch_ratio=max_extra_patch_ratio,
-        validation_dilation_iterations=int(validation_dilation_iterations),
-        local_refinement_radius=int(local_refinement_radius),
-        validation_padding=int(validation_padding),
+        scan_scales=int(scan_scales),
+        use_smart_cliff=use_smart_cliff,
         enable_debug=enable_debug,
     )
-    detector = PatternDetector(config)
-    detections, visualization_bgr = detector.detect(pattern_bgr, drawing_bgr)
-    elapsed = time.perf_counter() - start
 
-    result: dict[str, Any] = {
-        "detections": [det.to_json() for det in detections],
-        "debug_counts": detector.last_debug_counts,
+    elapsed = time.perf_counter() - start
+    visualization_rgb = draw_baseline_detections(drawing_bgr, detections)[:, :, ::-1]
+    result = {
+        "method": "zet_tm",
+        "num_detections": len(detections),
+        "detections": detections,
     }
-    visualization_rgb = visualization_bgr[:, :, ::-1]
     return visualization_rgb, json.dumps(result, indent=2), f"{elapsed:.2f} seconds"
 
 
@@ -144,60 +75,26 @@ def launch_demo() -> None:
         raise first_error
 
 
-with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
-    gr.Markdown("# Zero-shot BOM Pattern Detector")
+with gr.Blocks(title="ZET Template Matching Detector") as demo:
+    gr.Markdown("# ZET Template Matching Detector")
+
     with gr.Row():
         pattern_input = gr.Image(label="Pattern image", type="numpy")
         drawing_input = gr.Image(label="Drawing image", type="numpy")
 
-    method = gr.Dropdown(
-        choices=["advanced", "zet_tm", "zet_hog"],
-        value="advanced",
-        label="Detection method",
-    )
+    with gr.Row():
+        wide_thr = gr.Slider(0.0, 1.0, value=0.25, step=0.01, label="Candidate threshold")
+        nms_iou = gr.Slider(0.05, 0.9, value=0.35, step=0.01, label="NMS IoU")
+        top_k = gr.Slider(1, 100, value=15, step=1, label="Top K")
 
     with gr.Row():
-        threshold = gr.Slider(0.1, 0.95, value=0.35, step=0.01, label="Confidence threshold")
-        nms_iou = gr.Slider(0.05, 0.9, value=0.30, step=0.01, label="NMS IoU threshold")
-        max_processing_dim = gr.Slider(800, 4000, value=2500, step=100, label="Max processing dimension")
+        min_scale = gr.Slider(0.01, 1.5, value=0.05, step=0.01, label="Min scale")
+        max_scale = gr.Slider(0.05, 2.0, value=0.85, step=0.01, label="Max scale")
+        scan_scales = gr.Slider(1, 80, value=30, step=1, label="Scan scales")
 
     with gr.Row():
-        min_scale = gr.Slider(0.02, 1.0, value=0.05, step=0.01, label="Min scale")
-        max_scale = gr.Slider(0.1, 2.5, value=0.30, step=0.01, label="Max scale")
-        scale_step = gr.Slider(0.01, 0.5, value=0.02, step=0.01, label="Scale step")
-
-    with gr.Row():
-        rotations = gr.Textbox(value="0,90,180,270", label="Rotations")
-        fine_rotation_range = gr.Slider(0, 20, value=0, step=1, label="Fine rotation range")
-        fine_rotation_step = gr.Slider(1, 20, value=5, step=1, label="Fine rotation step")
-
-    with gr.Row():
-        stride = gr.Slider(2, 32, value=2, step=1, label="Stride")
-        top_k = gr.Slider(20, 1000, value=800, step=20, label="Top K per variant")
-        enable_debug = gr.Checkbox(value=False, label="Enable debug images")
-
-    with gr.Accordion("Advanced validation", open=False):
-        with gr.Row():
-            chamfer_sigma = gr.Slider(1.0, 20.0, value=8.0, step=0.5, label="Chamfer sigma")
-            max_chamfer_distance = gr.Slider(1.0, 40.0, value=12.0, step=0.5, label="Max chamfer distance")
-        with gr.Row():
-            min_template_coverage = gr.Slider(0.0, 1.0, value=0.25, step=0.01, label="Min template coverage")
-            min_patch_coverage = gr.Slider(0.0, 1.0, value=0.25, step=0.01, label="Min patch coverage")
-            max_extra_patch_ratio = gr.Slider(0.0, 1.0, value=0.90, step=0.01, label="Max extra patch ratio")
-        with gr.Row():
-            validation_dilation_iterations = gr.Slider(0, 5, value=2, step=1, label="Validation dilation iterations")
-            local_refinement_radius = gr.Slider(0, 8, value=4, step=1, label="Local refinement radius")
-            validation_padding = gr.Slider(0, 8, value=3, step=1, label="Validation padding")
-
-    with gr.Accordion("Experimental baseline settings", open=False):
-        with gr.Row():
-            wide_thr = gr.Slider(0.0, 1.0, value=0.25, step=0.01, label="Wide threshold")
-            stride_ratio = gr.Slider(0.05, 1.0, value=0.25, step=0.05, label="HOG stride ratio")
-        with gr.Row():
-            baseline_min_scale = gr.Slider(0.01, 1.5, value=0.05, step=0.01, label="Baseline min scale")
-            baseline_max_scale = gr.Slider(0.05, 2.0, value=0.85, step=0.01, label="Baseline max scale")
-            baseline_scan_scales = gr.Slider(1, 80, value=30, step=1, label="Baseline scan scales")
         use_smart_cliff = gr.Checkbox(value=True, label="Use smart cliff")
+        enable_debug = gr.Checkbox(value=False, label="Save debug output")
 
     run_button = gr.Button("Detect", variant="primary")
 
@@ -212,31 +109,12 @@ with gr.Blocks(title="Zero-shot BOM Pattern Detector") as demo:
         inputs=[
             pattern_input,
             drawing_input,
-            method,
-            threshold,
+            wide_thr,
             min_scale,
             max_scale,
-            scale_step,
-            rotations,
-            fine_rotation_range,
-            fine_rotation_step,
-            stride,
+            scan_scales,
             top_k,
             nms_iou,
-            max_processing_dim,
-            chamfer_sigma,
-            max_chamfer_distance,
-            min_template_coverage,
-            min_patch_coverage,
-            max_extra_patch_ratio,
-            validation_dilation_iterations,
-            local_refinement_radius,
-            validation_padding,
-            wide_thr,
-            stride_ratio,
-            baseline_min_scale,
-            baseline_max_scale,
-            baseline_scan_scales,
             use_smart_cliff,
             enable_debug,
         ],
