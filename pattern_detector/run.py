@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-min-scale", type=float, default=0.05, help="Minimum template scale")
     parser.add_argument("--baseline-max-scale", type=float, default=0.85, help="Maximum template scale")
     parser.add_argument("--baseline-scan-scales", type=int, default=30, help="Number of scales to scan near best scale")
+    parser.add_argument("--scale-step", type=float, default=0.02, help="Scale step for TM scan near best scale")
     parser.add_argument("--top-k", type=int, default=15, help="Maximum detections after NMS")
     parser.add_argument("--nms-iou", "--nms-iou-threshold", dest="nms_iou", type=float, default=0.35, help="NMS IoU threshold")
     parser.add_argument("--use-smart-cliff", dest="use_smart_cliff", action="store_true", default=True)
@@ -43,6 +44,7 @@ def main() -> None:
         min_scale=args.baseline_min_scale,
         max_scale=args.baseline_max_scale,
         scan_scales=args.baseline_scan_scales,
+        scale_step=args.scale_step,
         use_smart_cliff=args.use_smart_cliff,
         enable_debug=args.enable_debug,
         debug_dir=args.debug_dir,

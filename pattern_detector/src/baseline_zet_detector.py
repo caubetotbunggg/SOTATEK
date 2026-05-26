@@ -123,6 +123,7 @@ def run_tm_baseline(
     min_scale: float = 0.05,
     max_scale: float = 0.85,
     scan_scales: int = 30,
+    scale_step: float | None = None,
     use_smart_cliff: bool = True,
     enable_debug: bool = False,
     debug_dir: str = "outputs/debug",
@@ -138,7 +139,7 @@ def run_tm_baseline(
     scores: list[float] = []
     details: list[dict[str, float | int | str]] = []
 
-    for scale in np.linspace(low, high, max(1, int(scan_scales))):
+    for scale in _scan_scale_values(low, high, scan_scales, scale_step):
         ref_scaled = _resize_ref(ref_gray, float(scale))
         if ref_scaled is None:
             continue
@@ -213,6 +214,20 @@ def _resize_ref(ref_gray: np.ndarray, scale: float) -> np.ndarray | None:
     if new_w < 4 or new_h < 4:
         return None
     return cv2.resize(ref_gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _scan_scale_values(
+    low: float,
+    high: float,
+    scan_scales: int,
+    scale_step: float | None,
+) -> np.ndarray:
+    if scale_step is not None and scale_step > 0:
+        values = np.arange(low, high + scale_step * 0.5, scale_step, dtype=np.float32)
+        if values.size == 0 or float(values[-1]) < high:
+            values = np.append(values, np.float32(high))
+        return values
+    return np.linspace(low, high, max(1, int(scan_scales)), dtype=np.float32)
 
 
 def _foreground_mask(gray: np.ndarray) -> np.ndarray:

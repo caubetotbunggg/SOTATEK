@@ -24,7 +24,7 @@ def run_detection(
     wide_thr: float,
     min_scale: float,
     max_scale: float,
-    scan_scales: int,
+    scale_step: float,
     top_k: int,
     nms_iou: float,
     use_smart_cliff: bool,
@@ -42,7 +42,7 @@ def run_detection(
         top_k=int(top_k),
         min_scale=min_scale,
         max_scale=max_scale,
-        scan_scales=int(scan_scales),
+        scale_step=scale_step,
         use_smart_cliff=use_smart_cliff,
         enable_debug=enable_debug,
     )
@@ -90,7 +90,7 @@ with gr.Blocks(title="ZET Template Matching Detector") as demo:
     with gr.Row():
         min_scale = gr.Slider(0.01, 1.5, value=0.05, step=0.01, label="Min scale")
         max_scale = gr.Slider(0.05, 2.0, value=0.85, step=0.01, label="Max scale")
-        scan_scales = gr.Slider(1, 80, value=30, step=1, label="Scan scales")
+        scale_step = gr.Slider(0.001, 0.20, value=0.02, step=0.001, label="Scale step")
 
     with gr.Row():
         use_smart_cliff = gr.Checkbox(value=True, label="Use smart cliff")
@@ -112,7 +112,7 @@ with gr.Blocks(title="ZET Template Matching Detector") as demo:
             wide_thr,
             min_scale,
             max_scale,
-            scan_scales,
+            scale_step,
             top_k,
             nms_iou,
             use_smart_cliff,
