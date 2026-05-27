@@ -1,16 +1,3 @@
----
-title: SOTATEK Pattern Detector
-emoji: 🔍
-colorFrom: blue
-colorTo: purple
-sdk: gradio
-sdk_version: 4.44.1
-python_version: "3.11"
-app_file: app.py
-pinned: false
-license: mit
----
-
 # SOTATEK — ZET Template Matching Detector
 
 Zero-shot pattern detection on technical drawings: upload a **pattern** (template) and a **drawing**, run inference online, and view bounding boxes on the result image.
